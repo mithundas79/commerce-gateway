@@ -64,6 +64,36 @@ async function bounded<T>(promise: Promise<T>, message = 'Expected worker did no
 }
 const options = (provider: OperationProvider) => ({ pool, provider, timeoutMs: 10_000, leaseMs: 60_000 });
 
+test('held operations reach terminal deadline outcomes without provider dispatch or releasing the hold', async () => {
+  const queued = await enqueue('Queued before hold');
+  const recovering = await enqueue('Previously dispatched');
+  const future = await enqueue('Still within deadline');
+  await pool.query(`UPDATE operations SET status='recovering', dispatch_started_at=clock_timestamp() WHERE id=$1`, [recovering]);
+  await pool.query(`UPDATE connections SET lifecycle_hold=true, worker_not_before=clock_timestamp()+interval '1 hour' WHERE id=$1`, [connectionId]);
+  let calls = 0;
+  const unexpectedProvider = async () => { calls++; throw new Error('Held work must not reach the provider'); };
+  const provider: OperationProvider = { readProductTitle: unexpectedProvider, updateProductTitle: unexpectedProvider };
+
+  assert.equal(await runWorkerOnce(options(provider)), false);
+  await pool.query(`UPDATE operations SET deadline_at=clock_timestamp()-interval '1 second' WHERE id=ANY($1::uuid[])`, [[queued, recovering]]);
+  assert.equal(await runWorkerOnce(options(provider)), true);
+  assert.equal(await runWorkerOnce(options(provider)), true);
+  assert.equal(await runWorkerOnce(options(provider)), false);
+
+  const rows = (await pool.query('SELECT id,status,error,completed_at,lease_until FROM operations')).rows;
+  for (const [id, expected] of [[queued, 'failed'], [recovering, 'uncertain']]) {
+    const operation = rows.find(row => row.id === id);
+    assert.equal(operation.status, expected);
+    assert.equal(operation.error.code, 'DEADLINE_OR_ATTEMPTS_EXCEEDED');
+    assert.ok(operation.completed_at);
+    assert.equal(operation.lease_until, null);
+  }
+  assert.equal((await status(future)).status, 'queued');
+  assert.equal((await status(future)).attempt_count, 0);
+  assert.equal((await pool.query('SELECT lifecycle_hold FROM connections WHERE id=$1', [connectionId])).rows[0].lifecycle_hold, true);
+  assert.equal(calls, 0);
+});
+
 test('same-product writes are FIFO across concurrent workers while another product runs in parallel', async () => {
   const first = await enqueue('Older');
   const second = await enqueue('Newer');
