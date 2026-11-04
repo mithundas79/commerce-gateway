@@ -38,8 +38,8 @@ export function labOptions(args) {
   const options={};
   for(let i=0;i<args.length;i++) {
     const name=args[i];
-    if(!['--settings','--origin','--shop','--bash','--mutate','--ack','--product','--title','--resume','--new-run'].includes(name) || Object.hasOwn(options,name)) fail('INVALID_LAB_ARGUMENTS');
-    options[name]=['--mutate','--resume','--new-run'].includes(name)?true:args[++i];
+    if(!['--settings','--origin','--shop','--bash','--mutate','--ack','--product','--title','--resume','--new-run','--prepare-only'].includes(name) || Object.hasOwn(options,name)) fail('INVALID_LAB_ARGUMENTS');
+    options[name]=['--mutate','--resume','--new-run','--prepare-only'].includes(name)?true:args[++i];
     if(options[name]===undefined) fail('INVALID_LAB_ARGUMENTS');
   }
   let url;
@@ -48,6 +48,7 @@ export function labOptions(args) {
     || options['--origin']!==url.origin) fail('VERIFIED_HTTPS_ORIGIN_REQUIRED');
   if(!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.myshopify\.com$/.test(options['--shop']??'')) fail('EXACT_SHOP_REQUIRED');
   if(!options['--settings'] || !options['--bash']) fail('SETTINGS_AND_GIT_BASH_PATH_REQUIRED');
+  if(options['--prepare-only'] && ['--mutate','--ack','--product','--title','--resume','--new-run'].some(name=>Object.hasOwn(options,name))) fail('PREPARE_ONLY_CONFLICTS_WITH_MUTATION_OR_RECOVERY');
   if(options['--resume'] && !options['--mutate']) fail('RESUME_REQUIRES_MUTATION_OPT_IN');
   if(options['--new-run'] && (!options['--mutate'] || options['--resume'])) fail('NEW_RUN_REQUIRES_MUTATION_OPT_IN_WITHOUT_RESUME');
   if(options['--mutate']) smokeConfig(smokeEnvironment(options,'a'.repeat(64),randomUUID(),randomUUID()));
@@ -142,30 +143,35 @@ async function saveState(path,state) {
   await rename(path+'.pending',path);
 }
 
-export async function runLab(options) {
-  if(process.platform!=='win32') fail('WINDOWS_REQUIRED');
+export async function runLab(options,dependencies={}) {
+  const labRoot=dependencies.root??root,run=dependencies.execute??execute;
+  if((dependencies.platform??process.platform)!=='win32') fail('WINDOWS_REQUIRED');
   if(process.env.NODE_TLS_REJECT_UNAUTHORIZED==='0') fail('TLS_VERIFICATION_REQUIRED');
   const settingsPath=resolve(options['--settings']);
-  if(settingsPath===resolve(root,'.env')) fail('USE_SEPARATE_SHOPIFY_SETTINGS_FILE');
+  if(settingsPath===resolve(labRoot,'.env')) fail('USE_SEPARATE_SHOPIFY_SETTINGS_FILE');
   const settings=shopifySettings(await readFile(settingsPath,'utf8'));
   // Never inherit settings that could redirect Docker/Compose or disable TLS verification.
   const cleanEnv={...process.env};
   for(const key of Object.keys(cleanEnv)) if(/^(?:SHOPIFY_|COMPOSE_|DOCKER_|POSTGRES_|MASTER_KEY$|TENANT_ID$|API_KEY$|PUBLIC_BASE_URL$|HOST_PORT$|NODE_OPTIONS$|NODE_EXTRA_CA_CERTS$|NODE_TLS_REJECT_UNAUTHORIZED$|BASH_ENV$|ENV$)/i.test(key)) delete cleanEnv[key];
-  const docker=(args,extra={})=>execute('docker',args,{env:cleanEnv,capture:true,...extra});
+  const docker=(args,extra={})=>run('docker',args,{env:cleanEnv,capture:true,...extra});
   const labels=await docker(['ps','-a','--filter','label=com.docker.compose.project=commerce-gateway','--format','{{.Label "com.docker.compose.project.working_dir"}}']);
   const normalized=value=>value.replaceAll('\\','/').replace(/^\/([a-z])\//i,'$1:/').toLowerCase();
-  if(labels.trim().split(/\r?\n/).filter(Boolean).some(value=>normalized(value)!==normalized(root))) fail('DOCKER_PROJECT_BELONGS_TO_ANOTHER_DIRECTORY');
+  if(labels.trim().split(/\r?\n/).filter(Boolean).some(value=>normalized(value)!==normalized(labRoot))) fail('DOCKER_PROJECT_BELONGS_TO_ANOTHER_DIRECTORY');
   let installSettings=null;
-  try {installSettings=await readFile(resolve(root,'.env'),'utf8');} catch(error) {if(error.code!=='ENOENT') fail('INSTALL_SETTINGS_UNREADABLE');}
+  try {installSettings=await readFile(resolve(labRoot,'.env'),'utf8');} catch(error) {if(error.code!=='ENOENT') fail('INSTALL_SETTINGS_UNREADABLE');}
   const volumes=await docker(['volume','ls','--filter','label=com.docker.compose.project=commerce-gateway','--format','{{.Name}}']);
   if(!installSettings && (labels.trim() || volumes.trim())) fail('EXISTING_DOCKER_PROJECT_REQUIRES_ITS_ORIGINAL_INSTALLATION');
-  await mkdir(resolve(root,'.secrets'),{recursive:true,mode:0o700});
-  const lockPath=resolve(root,'.secrets/windows-lab.lock');
+  await mkdir(resolve(labRoot,'.secrets'),{recursive:true,mode:0o700});
+  const lockPath=resolve(labRoot,'.secrets/windows-lab.lock');
   let lock;
   try {lock=await open(lockPath,'wx',0o600);} catch {fail('LAB_LOCK_PRESENT_VERIFY_NO_OTHER_LAB_IS_RUNNING');}
   try {
-    const statePath=resolve(root,'.secrets/windows-lab-run.json');
+    const statePath=resolve(labRoot,'.secrets/windows-lab-run.json');
     let state=await loadState(statePath);
+    if(options['--prepare-only'] && state?.smokeStarted) {
+      if(!state.report?.passed || !state.report?.restored) fail('PRIOR_RUN_REQUIRES_EXPLICIT_RESUME_AND_RECONCILIATION');
+      state=null;
+    }
     if(state?.smokeStarted) {
       for(const [name,value] of [['origin',options['--origin']],['shop',options['--shop']],['product',options['--product']],['title',options['--title']]]) if(state[name]!==value) fail('RECOVERY_INPUT_MISMATCH');
       if(!uuid.test(state.runId??'') || !uuid.test(state.connectionId??'')) fail('INVALID_LAB_RECOVERY_STATE');
@@ -175,8 +181,8 @@ export async function runLab(options) {
       }
       if(state && !options['--resume']) fail('PRIOR_RUN_REQUIRES_EXPLICIT_RESUME_AND_RECONCILIATION');
     } else if(options['--resume']) fail('NO_SMOKE_RUN_TO_RESUME');
-    await execute(options['--bash'],['--noprofile','--norc',resolve(root,'release/install.sh').replaceAll('\\','/'),options['--origin']],{env:cleanEnv});
-    installSettings=await readFile(resolve(root,'.env'),'utf8');
+    await run(options['--bash'],['--noprofile','--norc',resolve(labRoot,'release/install.sh').replaceAll('\\','/'),options['--origin']],{env:cleanEnv,capture:options['--prepare-only']===true});
+    installSettings=await readFile(resolve(labRoot,'.env'),'utf8');
     const tenantLines=installSettings.split(/\r?\n/).filter(line=>line.startsWith('TENANT_ID='));
     if(tenantLines.length!==1 || !uuid.test(tenantLines[0].slice(10))) fail('INVALID_INSTALL_TENANT');
     const portLines=installSettings.split(/\r?\n/).filter(line=>line.startsWith('HOST_PORT='));
@@ -184,7 +190,7 @@ export async function runLab(options) {
     const port=portLines[0].slice(10);
     const localFetch=localGatewayFetch(options['--origin'],port);
     const localOrigin=`http://127.0.0.1:${Number(port)}`;
-    const bearer=(await readFile(resolve(root,'.secrets/bootstrap-api-key'),'utf8')).trim();
+    const bearer=(await readFile(resolve(labRoot,'.secrets/bootstrap-api-key'),'utf8')).trim();
     if(!/^[a-f0-9]{64}$/.test(bearer)) fail('INVALID_INSTALL_BEARER');
     const compose=['compose','--project-name','commerce-gateway','--env-file','.env','-f','compose.yaml'];
     const tenant=tenantLines[0].slice(10);
@@ -198,10 +204,15 @@ export async function runLab(options) {
     } else {
       await docker([...compose,'run','--rm','--no-deps','-T','-e','TENANT_ID','-e','SHOPIFY_CLIENT_ID','-e','SHOPIFY_CLIENT_SECRET','-e','SHOPIFY_SCOPES','-e','SHOPIFY_RETURN_URLS','api','node','dist/admin.js','configure-shopify'],
         {env:{...cleanEnv,...settings,TENANT_ID:tenant,SHOPIFY_RETURN_URLS:''}});
+      if(options['--prepare-only']) {
+        const report={acceptance:'windows-disposable-lab-setup',prepared:true,
+          callbackUrl:options['--origin']+'/oauth/shopify/callback'};
+        console.log(JSON.stringify(report));return report;
+      }
       const previous=await exactConnection(options,bearer,localOrigin);
       const started=await jsonRequest(localOrigin,'/v1/shopify/connect',bearer,{method:'POST',body:JSON.stringify({shop:options['--shop']})});
       const url=browserStart(started.browserStartUrl,options['--origin']);
-      await execute('powershell.exe',['-NoProfile','-NonInteractive','-Command','Start-Process -FilePath $env:CG_LAB_BROWSER_START | Out-Null'],{env:{...cleanEnv,CG_LAB_BROWSER_START:url},capture:true});
+      await run('powershell.exe',['-NoProfile','-NonInteractive','-Command','Start-Process -FilePath $env:CG_LAB_BROWSER_START | Out-Null'],{env:{...cleanEnv,CG_LAB_BROWSER_START:url},capture:true});
       console.log('Approve the exact requested development shop in your browser. Waiting for its completed OAuth connection.');
       const deadline=Date.now()+900_000;
       do {

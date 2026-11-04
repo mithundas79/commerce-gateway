@@ -16,6 +16,16 @@ The command installs the service, repeats migration/bootstrap with the same tena
 
 The installer uses the fixed Docker project `commerce-gateway`, its durable PostgreSQL volume, and loopback port 3000. The helper refuses containers whose Compose working directory differs from this checkout and refuses existing project volumes when this checkout has no installation `.env`. Use one lab per Docker host and keep this checkout for recovery. Resolve a host-port conflict or stop another installation deliberately before retrying. Repeated invocation retains the installation's master key, tenant, database, and bearer. The helper runs no Docker volume deletion or database reset.
 
+## Prepare the service for a handoff
+
+Use `-PrepareOnly` when the Docker operator will hand the configured service to someone who can complete Shopify app-version configuration, browser approval, and acceptance through the local gateway.
+
+```powershell
+.\release\windows-lab.ps1 -ShopifyEnvPath 'C:\private\shopify.env' -PublicOrigin 'https://gateway.your-domain.tld' -Shop 'your-disposable-store.myshopify.com' -PrepareOnly
+```
+
+The command completes installation, repeated migration/bootstrap, public HTTPS readiness, and secure tenant Shopify configuration, then exits with a fixed setup report and the exact callback URL. It creates no OAuth/browser ticket, opens no browser, performs no connection polling, and submits no product write. Keep the HTTPS ingress running for the subsequent browser callback. `-PrepareOnly` rejects mutation acknowledgement/target arguments, `-AllowMutation`, `-Resume`, and `-NewRun`. An existing incomplete mutation run retains its recovery guards.
+
 ## Explicit disposable product test
 
 Independently confirm that the exact shop is a disposable development store, reserve one disposable product, and stop other writers to it through verified restoration. Shopify's development-store billing status cannot be established by this gateway. Add every mutation argument to the same command only when you intend the real temporary title write and restoration.

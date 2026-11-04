@@ -1,3 +1,4 @@
+param([switch]$PrepareOnly)
 $ErrorActionPreference = 'Stop'
 
 # Run this script in a separate Windows PowerShell process. The wrapper's exit
@@ -11,12 +12,16 @@ function global:node {
         '--settings', 'C:\private settings\shopify.env',
         '--origin', 'https://gateway.example.com',
         '--shop', 'disposable.myshopify.com',
-        '--bash', 'C:\Program Files\Git\bin\bash.exe',
-        '--mutate', '--ack', 'disposable.myshopify.com',
+        '--bash', 'C:\Program Files\Git\bin\bash.exe'
+    )
+    if ($PrepareOnly) {
+        $expected += '--prepare-only'
+    } else {
+        $expected += @('--mutate', '--ack', 'disposable.myshopify.com',
         '--product', 'gid://shopify/Product/123',
         '--title', 'Exact disposable "quoted" product title',
-        '--resume'
-    )
+        '--resume')
+    }
     if ($actual.Count -ne $expected.Count) { throw 'Unexpected wrapper argument count' }
     for ($index = 0; $index -lt $expected.Count; $index++) {
         if ($actual[$index] -cne $expected[$index]) { throw "Wrapper argument mismatch at position $index" }
@@ -25,11 +30,19 @@ function global:node {
     $global:LASTEXITCODE = 0
 }
 
-& (Join-Path (Split-Path $PSScriptRoot -Parent) 'release\windows-lab.ps1') `
-    -ShopifyEnvPath 'C:\private settings\shopify.env' `
-    -PublicOrigin 'https://gateway.example.com' `
-    -Shop 'disposable.myshopify.com' `
-    -GitBashPath 'C:\Program Files\Git\bin\bash.exe' `
-    -AllowMutation -DisposableStoreAck 'disposable.myshopify.com' `
-    -ProductGid 'gid://shopify/Product/123' `
-    -OriginalTitle 'Exact disposable "quoted" product title' -Resume
+$wrapperArguments = @{
+    ShopifyEnvPath = 'C:\private settings\shopify.env'
+    PublicOrigin = 'https://gateway.example.com'
+    Shop = 'disposable.myshopify.com'
+    GitBashPath = 'C:\Program Files\Git\bin\bash.exe'
+}
+if ($PrepareOnly) {
+    $wrapperArguments.PrepareOnly = $true
+} else {
+    $wrapperArguments.AllowMutation = $true
+    $wrapperArguments.DisposableStoreAck = 'disposable.myshopify.com'
+    $wrapperArguments.ProductGid = 'gid://shopify/Product/123'
+    $wrapperArguments.OriginalTitle = 'Exact disposable "quoted" product title'
+    $wrapperArguments.Resume = $true
+}
+& (Join-Path (Split-Path $PSScriptRoot -Parent) 'release\windows-lab.ps1') @wrapperArguments
