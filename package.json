@@ -7,7 +7,7 @@
   "author": "Mithun Das",
   "repository": "github:mithundas79/commerce-gateway",
   "engines": { "node": ">=26.0.0 <27" },
-  "files": ["dist", "migrations", "README.md", "LICENSE"],
+  "files": ["dist", "migrations", "openapi.json", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",

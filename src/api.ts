@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Pool } from 'pg';
 import { ConnectorError } from './shopify.js';
 
@@ -99,18 +99,21 @@ export function buildApi(options: ApiOptions): FastifyInstance {
     }
     const code = typeof failure?.code === 'string' && /^[A-Z0-9_]{1,80}$/.test(failure.code) ? failure.code : 'INTERNAL_ERROR';
     request.log.error({ code }, 'Gateway request failed');
+    if (request.url.split('?', 1)[0] === '/v1/health') return reply.code(503).send({ status: 'unavailable' });
     return reply.code(500).send({ error: 'INTERNAL_ERROR' });
   });
 
   app.get('/healthz', async () => ({ status: 'ok' }));
-  app.get('/readyz', async (_request, reply) => {
+  async function readiness(_request: FastifyRequest, reply: FastifyReply) {
     try {
       await pool.query('SELECT 1');
       return { status: 'ready' };
     } catch {
       return reply.code(503).send({ status: 'unavailable' });
     }
-  });
+  }
+  app.get('/readyz', readiness);
+  app.get('/v1/health', readiness);
 
   app.get<{ Querystring: { first?: string; after?: string } }>('/v1/connections', {
     schema: { querystring: { type: 'object', additionalProperties: false, properties: {
