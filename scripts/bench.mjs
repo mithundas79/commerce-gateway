@@ -29,8 +29,22 @@ export async function runLoad({ requests, concurrency, request }) {
   const errorCounts = {};
   let next = 0;
   let errors = 0;
+  const resourceSampleIntervalMs = 10;
+  const initialMemory = process.memoryUsage();
+  let peakRssBytes = initialMemory.rss;
+  let peakHeapUsedBytes = initialMemory.heapUsed;
+  const sampleMemory = () => {
+    const memory = process.memoryUsage();
+    peakRssBytes = Math.max(peakRssBytes, memory.rss);
+    peakHeapUsedBytes = Math.max(peakHeapUsedBytes, memory.heapUsed);
+    return memory;
+  };
+  const cpuStart = process.cpuUsage();
   const start = performance.now();
-  await Promise.all(Array.from({ length: Math.min(concurrency, requests) }, async () => {
+  const resourceTimer = setInterval(sampleMemory, resourceSampleIntervalMs);
+  resourceTimer.unref();
+  try {
+    await Promise.all(Array.from({ length: Math.min(concurrency, requests) }, async () => {
     while (next < requests) {
       const index = next++;
       const began = performance.now();
@@ -46,8 +60,26 @@ export async function runLoad({ requests, concurrency, request }) {
         samples.push(performance.now() - began);
       }
     }
-  }));
-  return { ...summarize(samples, errors, performance.now() - start), errorCounts };
+    }));
+  } finally {
+    clearInterval(resourceTimer);
+  }
+  const finalMemory = sampleMemory();
+  const elapsedMs = performance.now() - start;
+  const cpu = process.cpuUsage(cpuStart);
+  const round = value => Number(value.toFixed(3));
+  return {
+    ...summarize(samples, errors, elapsedMs), errorCounts,
+    resources: {
+      cpuUserMs: round(cpu.user / 1_000),
+      cpuSystemMs: round(cpu.system / 1_000),
+      cpuTotalMs: round((cpu.user + cpu.system) / 1_000),
+      cpuPercentOfOneCore: round((cpu.user + cpu.system) / (elapsedMs * 10)),
+      rssStartBytes: initialMemory.rss, rssEndBytes: finalMemory.rss, sampledPeakRssBytes: peakRssBytes,
+      heapUsedStartBytes: initialMemory.heapUsed, heapUsedEndBytes: finalMemory.heapUsed,
+      sampledPeakHeapUsedBytes: peakHeapUsedBytes, sampleIntervalMs: resourceSampleIntervalMs,
+    },
+  };
 }
 
 function integer(env, key, fallback, min, max) {
@@ -179,6 +211,12 @@ export async function benchmark(env = process.env) {
     return {
       benchmark: 'commerce-gateway-local-overhead', timestamp: new Date().toISOString(),
       measurement: 'Loopback TCP HTTP response including auth, validation, PostgreSQL and JSON; excludes Shopify network/worker completion. Closed-loop clients; no open-loop saturation claim.',
+      resourceMeasurement: {
+        scope: 'Current Node.js process combines the gateway API and HTTP load generator. PostgreSQL runs separately and is excluded.',
+        cpu: 'Per-workload process.cpuUsage deltas, including all process threads. Percent is relative to one CPU core and may exceed 100.',
+        memory: 'Absolute process RSS and V8 heap used at workload boundaries and every 10 ms. Sampled peaks are lower bounds and include retained memory from prior workloads.',
+        limits: 'Host capacity is reported below. No explicit process CPU or memory limit is imposed by this benchmark; runner or container limits may apply.',
+      },
       runtime: { node: process.version, v8: process.versions.v8, platform: process.platform,
         architecture: process.arch, osRelease: os.release(), cpu: os.cpus()[0]?.model,
         logicalCpus: os.cpus().length, totalMemoryBytes: os.totalmem(), postgres, synchronousCommit, fsync },
