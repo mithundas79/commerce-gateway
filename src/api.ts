@@ -1,7 +1,8 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Pool } from 'pg';
 import { ConnectorError } from './shopify.js';
+import { createEnqueue } from './enqueue.js';
 
 export interface Connection {
   id: string;
@@ -64,6 +65,7 @@ export function buildApi(options: ApiOptions): FastifyInstance {
   if (!Number.isSafeInteger(operationTtlMs) || operationTtlMs < 1000 || operationTtlMs > 24 * 60 * 60 * 1000) {
     throw new Error('operationTtlMs must be between one second and one day');
   }
+  const enqueue = createEnqueue(pool, operationColumns, operationTtlMs);
   const app = Fastify({
     bodyLimit: 16 * 1024,
     logger: options.logger ? { redact: ['req.headers.authorization', 'req.headers.cookie', 'req.url'],
@@ -198,28 +200,10 @@ export function buildApi(options: ApiOptions): FastifyInstance {
       const connection = await findConnection(request, connectionId);
       if (!connection) return reply.code(404).send({ error: 'CONNECTION_NOT_FOUND' });
       const payload = { productId: request.body.productId, title: request.body.title };
-      // The SELECT also checks revocation atomically at enqueue time. The unique
-      // constraint serializes concurrent requests sharing an idempotency key.
-      const inserted = await pool.query(
-        `INSERT INTO operations (id, tenant_id, connection_id, kind, idempotency_key, payload, deadline_at)
-         SELECT $1, $2, id, 'product_title_update', $4, $5::jsonb, now() + ($6::double precision * interval '1 millisecond')
-         FROM connections WHERE tenant_id = $2 AND id = $3 AND revoked_at IS NULL AND NOT lifecycle_hold FOR SHARE
-         ON CONFLICT (tenant_id, connection_id, kind, idempotency_key) DO NOTHING
-         RETURNING ${operationColumns}`,
-        [randomUUID(), tenantId, connectionId, idempotencyKey, JSON.stringify(payload), operationTtlMs],
-      );
-      let row = inserted.rows[0];
-      const replayed = !row;
-      if (!row) {
-        const existing = await pool.query(
-          `SELECT ${operationColumns} FROM operations WHERE tenant_id = $1 AND connection_id = $2 AND kind = 'product_title_update' AND idempotency_key = $3`,
-          [tenantId, connectionId, idempotencyKey],
-        );
-        row = existing.rows[0];
-        if (!row) return reply.code(404).send({ error: 'CONNECTION_NOT_FOUND' });
-        if (row.payload.productId !== payload.productId || row.payload.title !== payload.title) {
-          return reply.code(409).send({ error: 'IDEMPOTENCY_CONFLICT' });
-        }
+      const { row, replayed } = await enqueue(tenantId, connectionId, idempotencyKey, payload);
+      if (!row) return reply.code(404).send({ error: 'CONNECTION_NOT_FOUND' });
+      if (row.payload.productId !== payload.productId || row.payload.title !== payload.title) {
+        return reply.code(409).send({ error: 'IDEMPOTENCY_CONFLICT' });
       }
       return reply.code(202).header('location', `/v1/operations/${row.id}`).send({ operation: publicOperation(row), replayed });
     },
