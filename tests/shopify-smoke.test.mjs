@@ -10,7 +10,7 @@ const env={SHOPIFY_SMOKE_ALLOW_MUTATION:'1',SHOPIFY_SMOKE_EXPECTED_DEV_STORE:'di
   SHOPIFY_SMOKE_RUN_ID:'30000000-0000-4000-8000-000000000001',SHOPIFY_SMOKE_PRODUCT_GID:product,
   SHOPIFY_SMOKE_ORIGINAL_TITLE:'Exact original test title',SHOPIFY_SMOKE_WAIT_MS:'1000',SHOPIFY_SMOKE_POLL_MS:'1000'};
 
-function fixture(mode='success') {
+function fixture(mode='success',status='DRAFT') {
   const config=smokeConfig(env),jobs=new Map(),requests=[],writes=[];
   let title=config.originalTitle,readErrors=0;
   const response=(body,status=200) => new Response(JSON.stringify(body),{status,headers:{'content-type':'application/json'}});
@@ -21,7 +21,7 @@ function fixture(mode='success') {
     if(url.pathname==='/v1/connections') return response({connections:[{id:connection,shop:mode==='wrong-shop'?'other.myshopify.com':config.shop,scopes:['read_products','write_products']}],pageInfo:{hasNextPage:false,endCursor:connection}});
     if(url.pathname===`/v1/connections/${connection}/products`) {
       if(mode==='readback-network-error' && title===config.temporaryTitle && readErrors++<3) throw new Error('secret network error');
-      return response({products:[{id:'gid://shopify/Product/999',title:'Never mutate this product'},{id:product,title}],pageInfo:{hasNextPage:false,endCursor:null}});
+      return response({products:[{id:'gid://shopify/Product/999',title:'Never mutate this product'},{id:product,title,status}],pageInfo:{hasNextPage:false,endCursor:null}});
     }
     if(url.pathname===`/v1/connections/${connection}/product-title-updates`) {
       const payload=JSON.parse(options.body),key=options.headers['idempotency-key'];writes.push({payload,key});
@@ -49,7 +49,7 @@ function fixture(mode='success') {
     }
     throw new Error('Unexpected mock request');
   };
-  return {requests,writes,jobs,config,fetch,sleep:async() => {},getTitle:() => title,setTitle:value => {title=value;}};
+  return {requests,writes,jobs,config,fetch,sleep:async() => {},getTitle:() => title,setTitle:value => {title=value;},setStatus:value => {status=value;}};
 }
 
 test('live smoke requires exact opt-in, disposable shop acknowledgement, HTTPS origin, IDs and original title',() => {
@@ -121,4 +121,29 @@ test('resume uses the same run marker and idempotency key after original outcome
   const report=await runShopifySmoke({...env,SHOPIFY_SMOKE_RESUME:'1'},f);
   assert.equal(report.passed,true);assert.equal(report.restored,true);
   assert.equal(f.writes[0].key,`smoke:${env.SHOPIFY_SMOKE_RUN_ID}:temporary`);
+});
+
+test('draft product preflight rejects every other or missing status before writing, including resume',async() => {
+  for(const status of ['ACTIVE','ARCHIVED','UNLISTED','draft','',null,undefined]) {
+    for(const resume of [false,true]) {
+      const f=fixture();f.setStatus(status);
+      if(resume) f.setTitle(f.config.temporaryTitle);
+      const report=await runShopifySmoke({...env,SHOPIFY_SMOKE_RESUME:resume?'1':'0'},f);
+      assert.equal(report.passed,false);assert.equal(report.error,'DRAFT_PRODUCT_REQUIRED');
+      assert.equal(report.manualReconciliationRequired,false);assert.equal(f.writes.length,0);
+    }
+  }
+});
+
+test('a status change after the temporary write prevents restoration and requires reconciliation',async() => {
+  const f=fixture();
+  const fetch=async(value,options) => {
+    const response=await f.fetch(value,options);
+    if(new URL(value).pathname.startsWith('/v1/operations/')) f.setStatus('ACTIVE');
+    return response;
+  };
+  const report=await runShopifySmoke(env,{...f,fetch});
+  assert.equal(report.passed,false);assert.equal(report.error,'DRAFT_PRODUCT_REQUIRED');
+  assert.equal(report.manualReconciliationRequired,true);assert.equal(report.restoreOperationId,null);
+  assert.equal(f.writes.length,2);assert.equal(f.getTitle(),f.config.temporaryTitle);
 });

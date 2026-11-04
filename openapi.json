@@ -272,6 +272,7 @@
                     {
                       "id": "gid://shopify/Product/123",
                       "title": "Disposable product",
+                      "status": "DRAFT",
                       "updatedAt": "2026-11-04T12:00:00.000Z"
                     }
                   ],
@@ -1570,6 +1571,11 @@
           "title": {
             "type": "string"
           },
+          "status": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Shopify product status. Guarded smoke acceptance requires DRAFT."
+          },
           "updatedAt": {
             "type": "string",
             "format": "date-time"
@@ -1578,6 +1584,7 @@
         "required": [
           "id",
           "title",
+          "status",
           "updatedAt"
         ],
         "additionalProperties": false
