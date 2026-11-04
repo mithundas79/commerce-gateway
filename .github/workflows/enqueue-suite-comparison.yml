@@ -1,0 +1,73 @@
+name: Temporary enqueue comparison around integration suite
+
+on:
+  push:
+    branches: [diagnostics/enqueue-comparison]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_DB: gateway_test
+          POSTGRES_USER: gateway
+          POSTGRES_PASSWORD: ci-local-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gateway -d gateway_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MERGED_SHA: fce4bc9e2c68de2348f73739c7fdaad0078b490b
+      BENCH_DATABASE_URL: postgres://gateway:ci-local-password@localhost:5432/gateway_test
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          ref: f1de506ca0c1eaf2c33c15bfebffb675910e7542
+          path: .bench/telemetry
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+      - name: Prepare exact merged source and independent telemetry
+        run: |
+          git worktree add --detach .bench/merged "$MERGED_SHA"
+          git -C .bench/telemetry diff --exit-code "$MERGED_SHA" -- src migrations tests package.json package-lock.json tsconfig.json tsconfig.test.json
+          for variant in merged telemetry; do
+            npm ci --prefix ".bench/$variant"
+            npm run build --prefix ".bench/$variant"
+          done
+          printf 'TELEMETRY_SHA=%s\n' "$(git -C .bench/telemetry rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Enable WAL timing on the disposable service
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER" psql -U gateway -d gateway_test -c "ALTER SYSTEM SET track_wal_io_timing=on"
+          docker exec "$POSTGRES_CONTAINER" psql -U gateway -d gateway_test -c "SELECT pg_reload_conf()"
+      - name: Run pre-suite, full integration suite, and two post-suite measurements
+        env:
+          DIAGNOSTIC_BENCH_ENTRY: .bench/telemetry/scripts/bench.mjs
+          BENCH_DIAGNOSTICS: '1'
+          BENCH_SOURCE_SHA: ${{ env.MERGED_SHA }}
+        run: node scripts/bench-suite-sequence.mjs
+      - name: Publish complete sequence and telemetry
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: enqueue-suite-comparison
+          path: benchmark-suite-output/
+          if-no-files-found: error
