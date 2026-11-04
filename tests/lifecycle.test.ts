@@ -36,7 +36,7 @@ test('registered raw webhook route verifies original bytes, topic capability, pa
     const response=await app.inject({method:'POST',url,headers,payload:raw});
     assert.equal(response.statusCode,200);assert.deepEqual(response.json(),{accepted:true});
     assert.deepEqual(calls[0][3],raw);assert.deepEqual(calls[0][2],{shopId:'123',shop});
-    assert.deepEqual(calls[0][4],['tenant']);
+    assert.equal(calls[0][4],webhookBinding(config,'shop-redact'));
     for(const [change,expected] of [
       [{payload:JSON.stringify(JSON.parse(raw.toString()))},401],
       [{headers:{...headers,'x-shopify-hmac-sha256':'malformed'}},401],
@@ -52,5 +52,25 @@ test('registered raw webhook route verifies original bytes, topic capability, pa
     const malformed=Buffer.from('{');
     assert.equal((await app.inject({method:'POST',url,headers:{...headers,'x-shopify-hmac-sha256':createHmac('sha256',config.clientSecret).update(malformed).digest('base64')},payload:malformed})).statusCode,400);
     assert.equal((await app.inject({method:'POST',url,headers:{...headers,'content-type':'text/plain'},payload:raw})).statusCode,415);
+  } finally {await app.close();}
+});
+
+test('a shared app with many tenants uses one indexed capability lookup and at most one secret load for unsolicited packets',async () => {
+  const tenants=Array.from({length:10000},(_,index) => `tenant-${index}`);
+  let queries=0;let secretLoads=0;
+  const known=webhookBinding(config,'shop-redact');
+  const expected=createHmac('sha256','unused').update('unused').digest('hex');
+  const pool={query:async (sql:string,values:string[]) => {
+    queries++;assert.match(sql,/webhook_bindings @> ARRAY\[\$2\]/);assert.match(sql,/LIMIT 1/);
+    assert.equal(values[0],config.clientId);
+    return {rows:values[1]===expected ? [{tenant_id:tenants[0]}] : []};
+  }} as unknown as Pool;
+  const store={getApp:async () => {secretLoads++;return config;}} as unknown as PostgresStore;
+  const app=buildApi({pool,publicRoutes:[shopifyWebhookRoute],readProducts:async () => {throw new Error('Unexpected read');}});
+  const lifecycle={receive:async () => {throw new Error('Invalid packet must not reach processing');}} as unknown as ShopifyLifecycle;
+  registerShopifyWebhooks(app,pool,store,lifecycle);
+  try {
+    const result=await app.inject({method:'POST',url:`/webhooks/shopify/app-id/shop-redact/${known}`,headers:{'content-type':'application/json','x-shopify-hmac-sha256':'invalid'},payload:'{}'});
+    assert.equal(result.statusCode,401);assert.equal(queries,1);assert.equal(secretLoads,0);
   } finally {await app.close();}
 });

@@ -7,6 +7,7 @@ import { createRuntime } from '../../src/main.js';
 import { webhookBinding, lifecycleTopics } from '../../src/lifecycle.js';
 import { PostgresStore } from '../../src/store.js';
 import { runWorkerOnce } from '../../src/worker.js';
+import { encryptSecret } from '../../src/crypto.js';
 
 const databaseUrl=process.env.DATABASE_URL;
 if(!databaseUrl) throw new Error('DATABASE_URL is required for real PostgreSQL lifecycle tests');
@@ -138,7 +139,12 @@ test('a concurrent reinstall supersedes an old provider proof and a later identi
   globalThis.fetch=async () => {started();await blocked;return new Response('{}',{status:401});};
   try {
     const payload={id:123,myshopify_domain:shop};
-    const delivered=f.send('app-uninstalled',payload);await entered;
+    const delivered=f.send('app-uninstalled',payload);
+    let timer:ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([entered,delivered.then(response => {throw new Error(`Delivery finished before proof (${response.statusCode}): ${response.body}`);}),
+        new Promise<never>((_,reject) => {timer=setTimeout(() => reject(new Error('Provider proof did not start within 10 seconds')),10000);})]);
+    } finally {if(timer) clearTimeout(timer);}
     const reinstalled=await f.install();release();await delivered;
     let current=(await f.pool.query('SELECT * FROM connections WHERE id=$1',[f.connection.id])).rows[0];
     assert.equal(current.authorization_generation,reinstalled.authorization_generation);assert.equal(current.revoked_at,null);assert.equal(current.lifecycle_hold,false);
@@ -177,5 +183,28 @@ test('an expired access token can refresh into an active installation without cl
     await f.send('shop-redact',{shop_id:123,shop_domain:shop});assert.equal(refreshes,1);
     const current=(await f.pool.query('SELECT * FROM connections')).rows[0];assert.equal(current.lifecycle_hold,false);assert.equal(current.revoked_at,null);
     assert.equal(current.authorization_generation,f.connection.authorization_generation);assert.equal((await f.store.get(f.tenant,shop))?.accessToken,'rotated');
+  } finally {globalThis.fetch=original;await f.close();}
+});
+
+test('indexed topic capabilities bound secret lookups with 1000 tenants sharing one app and reject unsafe numeric IDs',async () => {
+  const f=await fixture();const original=globalThis.fetch;
+  globalThis.fetch=async () => new Response('{}',{status:401});
+  try {
+    const tenants=(await f.pool.query(`INSERT INTO tenants(id,name) SELECT gen_random_uuid(),'shared-app-fixture' FROM generate_series(1,1000) RETURNING id`)).rows;
+    const bindings=(await f.pool.query('SELECT webhook_bindings FROM shopify_apps WHERE tenant_id=$1',[f.tenant])).rows[0].webhook_bindings;
+    const rows=tenants.map(row => ({tenant:row.id,ciphertext:encryptSecret(config.clientSecret,master,`app:${row.id}`)}));
+    await f.pool.query(`INSERT INTO shopify_apps(tenant_id,client_id,secret_ciphertext,redirect_uri,scopes,webhook_bindings)
+      SELECT x.tenant::uuid,$2,x.ciphertext,$3,ARRAY['write_products'],$4 FROM jsonb_to_recordset($1::jsonb) AS x(tenant text,ciphertext text)`,[JSON.stringify(rows),config.clientId,config.redirectUri,bindings]);
+    let loads=0;const getApp=f.runtime.store.getApp.bind(f.runtime.store);
+    f.runtime.store.getApp=async tenant => {loads++;return getApp(tenant);};
+    const raw='{"shop_id":9007199254740993,"shop_domain":"lifecycle.myshopify.com"}';
+    const url=`/webhooks/shopify/${config.clientId}/shop-redact/${webhookBinding(config,'shop-redact')}`;
+    const headers={'content-type':'application/json','x-shopify-topic':'shop/redact','x-shopify-shop-domain':shop,'x-shopify-hmac-sha256':createHmac('sha256',config.clientSecret).update(raw).digest('base64')};
+    assert.equal((await f.runtime.app.inject({method:'POST',url,headers,payload:raw})).statusCode,400);assert.equal(loads,1);
+    loads=0;
+    const unmatched=url.slice(0,-43)+'Z'.repeat(43);
+    assert.equal((await f.runtime.app.inject({method:'POST',url:unmatched,headers,payload:raw})).statusCode,401);assert.equal(loads,0);
+    loads=0;
+    assert.equal((await f.send('app-uninstalled',{id:123,myshopify_domain:shop})).statusCode,200);assert.equal(loads,2);
   } finally {globalThis.fetch=original;await f.close();}
 });

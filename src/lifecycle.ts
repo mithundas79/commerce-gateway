@@ -1,32 +1,12 @@
-import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
-import { ShopifyOAuth, verifyShopifyWebhook, type ShopifyAppConfig } from './oauth.js';
+import { hashOAuthValue, lifecycleTopics, ShopifyOAuth, verifyShopifyWebhook, webhookBinding, type LifecycleTopic as Topic } from './oauth.js';
 import { ConnectorError, ShopifyConnector, validateShop } from './shopify.js';
 import { PostgresStore } from './store.js';
 
 export const shopifyWebhookRoute = '/webhooks/shopify/:clientId/:topic/:binding';
-export const lifecycleTopics = {
-  'app-uninstalled': 'app/uninstalled',
-  'customers-data-request': 'customers/data_request',
-  'customers-redact': 'customers/redact',
-  'shop-redact': 'shop/redact',
-} as const;
-type Topic = keyof typeof lifecycleTopics;
-
-/** The body HMAC excludes headers. A secret URL binds each subscription to its topic. */
-export function webhookBinding(app: Pick<ShopifyAppConfig,'clientId'|'clientSecret'>, topic: Topic): string {
-  return createHmac('sha256', app.clientSecret).update(JSON.stringify(['commerce-gateway:shopify-topic-url:v1',app.clientId,topic])).digest('base64url');
-}
-
-export function webhookSubscriptions(app: ShopifyAppConfig, origin: string): string {
-  const entries = Object.entries(lifecycleTopics).map(([key,topic]) => {
-    const field = key === 'app-uninstalled' ? 'topics' : 'compliance_topics';
-    const uri = `${origin}/webhooks/shopify/${encodeURIComponent(app.clientId)}/${key}/${webhookBinding(app,key as Topic)}`;
-    return `[[webhooks.subscriptions]]\n${field} = [${JSON.stringify(topic)}]\nuri = ${JSON.stringify(uri)}`;
-  });
-  return `[webhooks]\napi_version = "2026-10"\n\n${entries.join('\n\n')}\n`;
-}
+export { lifecycleTopics, webhookBinding, webhookSubscriptions } from './oauth.js';
 
 function sameBinding(provided: string, expected: string): boolean {
   return /^[A-Za-z0-9_-]{43}$/.test(provided) && timingSafeEqual(Buffer.from(provided),Buffer.from(expected));
@@ -74,7 +54,7 @@ export class ShopifyLifecycle {
     finally { db.release(); }
   }
 
-  async receive(clientId: string, topic: Topic, signed: {shopId:string;shop?:string}, body: Buffer, verifiedTenants: string[], headerShop: unknown): Promise<string | undefined> {
+  async receive(clientId: string, topic: Topic, signed: {shopId:string;shop?:string}, body: Buffer, binding: string, hmac: string, headerShop: unknown): Promise<string | undefined> {
     // Only the HMAC-authenticated payload chooses the shop. Header values never choose a tenant.
     const found = await this.pool.query(`SELECT c.* FROM connections c
       JOIN shopify_apps a ON a.tenant_id=c.tenant_id
@@ -89,7 +69,8 @@ export class ShopifyLifecycle {
       return undefined;
     }
     const connection = found.rows[0];
-    if (!verifiedTenants.includes(connection.tenant_id)) throw new ConnectorError('AUTHENTICATION','Shop app signature mismatch',401);
+    const ownerApp=await this.store.getApp(connection.tenant_id);
+    if (ownerApp.clientId!==clientId || !sameBinding(binding,webhookBinding(ownerApp,topic)) || !verifyShopifyWebhook(body,hmac,ownerApp.clientSecret)) throw new ConnectorError('AUTHENTICATION','Shop app signature mismatch',401);
     if (headerShop !== connection.shop) throw new ConnectorError('VALIDATION','Shop header mismatch',400);
     if (connection.shopify_shop_id && connection.shopify_shop_id !== signed.shopId) throw new ConnectorError('VALIDATION','Shop identity mismatch',400);
     return this.transaction(connection.tenant_id,async db => {
@@ -211,20 +192,21 @@ export function registerShopifyWebhooks(app: FastifyInstance, pool: Pool, store:
     scope.post<{Params:{clientId:string;topic:Topic;binding:string};Body:Buffer}>('/webhooks/shopify/:clientId/:topic/:binding',{bodyLimit:1024*1024},async (request,reply) => {
       const {clientId,topic,binding} = request.params;
       if (!Object.hasOwn(lifecycleTopics,topic) || clientId.length>200) return reply.code(400).send({error:'INVALID_WEBHOOK'});
-      const candidates = await pool.query('SELECT tenant_id FROM shopify_apps WHERE client_id=$1',[clientId]);
-      const verifiedTenants: string[] = [];
-      for (const candidate of candidates.rows) {
-        const config = await store.getApp(candidate.tenant_id);
-        if (config.clientId === clientId && sameBinding(binding,webhookBinding(config,topic)) && verifyShopifyWebhook(request.body,String(request.headers['x-shopify-hmac-sha256'] ?? ''),config.clientSecret)) verifiedTenants.push(candidate.tenant_id);
-      }
-      if (!verifiedTenants.length) return reply.code(401).send({error:'INVALID_WEBHOOK_SIGNATURE'});
+      if (!/^[A-Za-z0-9_-]{43}$/.test(binding)) return reply.code(401).send({error:'INVALID_WEBHOOK_SIGNATURE'});
+      // Indexed capabilities select at most one secret even when thousands of tenants share an app.
+      const candidate = (await pool.query(`SELECT tenant_id FROM shopify_apps
+        WHERE client_id=$1 AND webhook_bindings @> ARRAY[$2]::text[] LIMIT 1`,[clientId,hashOAuthValue(binding)])).rows[0];
+      if (!candidate) return reply.code(401).send({error:'INVALID_WEBHOOK_SIGNATURE'});
+      const config = await store.getApp(candidate.tenant_id);
+      const hmac=String(request.headers['x-shopify-hmac-sha256'] ?? '');
+      if (config.clientId!==clientId || !sameBinding(binding,webhookBinding(config,topic)) || !verifyShopifyWebhook(request.body,hmac,config.clientSecret)) return reply.code(401).send({error:'INVALID_WEBHOOK_SIGNATURE'});
       if (request.headers['x-shopify-topic'] !== lifecycleTopics[topic]) return reply.code(400).send({error:'WEBHOOK_TOPIC_MISMATCH'});
       let signed: ReturnType<typeof identity>;
       try { signed=identity(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(request.body)),topic); }
       catch { return reply.code(400).send({error:'INVALID_WEBHOOK_PAYLOAD'}); }
       if (signed.shop && request.headers['x-shopify-shop-domain'] !== signed.shop) return reply.code(400).send({error:'WEBHOOK_SHOP_MISMATCH'});
       try {
-        await lifecycle.receive(clientId,topic,signed,request.body,verifiedTenants,request.headers['x-shopify-shop-domain']);
+        await lifecycle.receive(clientId,topic,signed,request.body,binding,hmac,request.headers['x-shopify-shop-domain']);
         return {accepted:true};
       } catch (error) {
         const status = error instanceof ConnectorError ? error.status : 503;

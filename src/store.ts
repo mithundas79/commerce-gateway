@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { decryptSecret, encryptSecret, validateMasterKey } from './crypto.js';
-import type { OfflineTokens, OAuthState, OAuthStateStore, OAuthTokenStore, ShopifyAppConfig } from './oauth.js';
+import { hashOAuthValue, lifecycleTopics, webhookBinding, type LifecycleTopic, type OfflineTokens, type OAuthState, type OAuthStateStore, type OAuthTokenStore, type ShopifyAppConfig } from './oauth.js';
 import { ConnectorError } from './shopify.js';
 
 /** Bounded maintenance uses database time and never touches operation/idempotency history. */
@@ -42,11 +42,22 @@ export class PostgresStore implements OAuthStateStore, OAuthTokenStore {
         const active = await this.db.query('SELECT id FROM connections WHERE tenant_id = $1 AND revoked_at IS NULL LIMIT 1', [tenantId]);
         if (active.rows.length) throw new Error('Revoke active connections before changing the Shopify app identity');
       }
-      await this.db.query(`INSERT INTO shopify_apps (tenant_id, client_id, secret_ciphertext, redirect_uri, scopes, allowed_return_urls)
-        VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id) DO UPDATE SET client_id=EXCLUDED.client_id,
+      const bindings=(Object.keys(lifecycleTopics) as LifecycleTopic[]).map(topic => hashOAuthValue(webhookBinding(app,topic)));
+      await this.db.query(`INSERT INTO shopify_apps (tenant_id, client_id, secret_ciphertext, redirect_uri, scopes, allowed_return_urls, webhook_bindings)
+        VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (tenant_id) DO UPDATE SET client_id=EXCLUDED.client_id,
         secret_ciphertext=EXCLUDED.secret_ciphertext, redirect_uri=EXCLUDED.redirect_uri, scopes=EXCLUDED.scopes,
-        allowed_return_urls=EXCLUDED.allowed_return_urls, updated_at=now()`,
-      [tenantId, app.clientId, encryptSecret(app.clientSecret, this.masterKey, `app:${tenantId}`), app.redirectUri, app.scopes, app.allowedReturnUrls]);
+        allowed_return_urls=EXCLUDED.allowed_return_urls, webhook_bindings=EXCLUDED.webhook_bindings, updated_at=now()`,
+      [tenantId, app.clientId, encryptSecret(app.clientSecret, this.masterKey, `app:${tenantId}`), app.redirectUri, app.scopes, app.allowedReturnUrls,bindings]);
+    });
+  }
+
+  /** Prime the indexed route capabilities when generating configuration for a pre-upgrade app. */
+  async prepareWebhookSubscriptions(tenantId: string): Promise<ShopifyAppConfig> {
+    return this.withLock(`${tenantId}:configuration`,async () => {
+      const app=await this.getApp(tenantId);
+      const bindings=(Object.keys(lifecycleTopics) as LifecycleTopic[]).map(topic => hashOAuthValue(webhookBinding(app,topic)));
+      await this.db.query('UPDATE shopify_apps SET webhook_bindings=$2 WHERE tenant_id=$1',[tenantId,bindings]);
+      return app;
     });
   }
 

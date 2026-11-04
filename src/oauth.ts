@@ -8,6 +8,26 @@ export interface ShopifyAppConfig {
   scopes: string[];
   allowedReturnUrls: string[];
 }
+export const lifecycleTopics = {
+  'app-uninstalled': 'app/uninstalled',
+  'customers-data-request': 'customers/data_request',
+  'customers-redact': 'customers/redact',
+  'shop-redact': 'shop/redact',
+} as const;
+export type LifecycleTopic = keyof typeof lifecycleTopics;
+
+/** Separate domain from the raw body signature, because Shopify does not sign topic headers. */
+export function webhookBinding(app: Pick<ShopifyAppConfig,'clientId'|'clientSecret'>, topic: LifecycleTopic): string {
+  return createHmac('sha256', app.clientSecret).update(JSON.stringify(['commerce-gateway:shopify-topic-url:v1',app.clientId,topic])).digest('base64url');
+}
+export function webhookSubscriptions(app: ShopifyAppConfig, origin: string): string {
+  const entries = Object.entries(lifecycleTopics).map(([key,topic]) => {
+    const field = key === 'app-uninstalled' ? 'topics' : 'compliance_topics';
+    const uri = `${origin}/webhooks/shopify/${encodeURIComponent(app.clientId)}/${key}/${webhookBinding(app,key as LifecycleTopic)}`;
+    return `[[webhooks.subscriptions]]\n${field} = [${JSON.stringify(topic)}]\nuri = ${JSON.stringify(uri)}`;
+  });
+  return `[webhooks]\napi_version = "2026-10"\n\n${entries.join('\n\n')}\n`;
+}
 export interface OAuthState {
   stateHash: string;
   tenantId: string;

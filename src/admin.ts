@@ -108,7 +108,7 @@ export async function runAdmin(args: string[], env = process.env): Promise<void>
   try {
     switch (args[0]) {
       case 'shopify-webhooks': {
-        const config = await new PostgresStore(pool,required(env,'MASTER_KEY')).getApp(tenantId(env));
+        const config = await new PostgresStore(pool,required(env,'MASTER_KEY')).prepareWebhookSubscriptions(tenantId(env));
         process.stdout.write(webhookSubscriptions(config,publicBaseUrl(required(env,'PUBLIC_BASE_URL'))));
         break;
       }

@@ -4,6 +4,8 @@ ALTER TABLE connections ADD COLUMN IF NOT EXISTS shopify_shop_id text;
 ALTER TABLE connections ADD COLUMN IF NOT EXISTS authorization_generation uuid NOT NULL DEFAULT gen_random_uuid();
 ALTER TABLE connections ADD COLUMN IF NOT EXISTS lifecycle_hold boolean NOT NULL DEFAULT false;
 CREATE INDEX IF NOT EXISTS connections_shopify_identity_idx ON connections(shopify_shop_id);
+ALTER TABLE shopify_apps ADD COLUMN IF NOT EXISTS webhook_bindings text[] NOT NULL DEFAULT '{}';
+CREATE INDEX IF NOT EXISTS shopify_apps_webhook_bindings_idx ON shopify_apps USING gin(webhook_bindings);
 
 -- Retain authenticated receipts without retaining webhook bodies or customer information.
 CREATE TABLE IF NOT EXISTS shopify_lifecycle_events (
