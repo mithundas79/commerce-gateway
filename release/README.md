@@ -106,6 +106,19 @@ docker compose run --rm --no-deps -T --env-from-file .secrets/tenants/acme.env \
 
 Create or select the intended Shopify app in the [Shopify Dev Dashboard](https://dev.shopify.com/dashboard). Use the app's client ID and client secret, not a store Admin API access token. Configure its exact OAuth redirect URL as `https://gateway.example.com/oauth/shopify/callback`, replacing the origin with this installation's `PUBLIC_BASE_URL`. Set the matching product permission to `write_products`. The gateway's `SHOPIFY_SCOPES` must match the scopes approved for the app; adding a scope requires merchant authorization again.
 
+This gateway implements standalone authorization-code OAuth. In the matching app's existing `shopify.app.toml`, merge these settings while retaining that app's `client_id`, name, and application URL. `use_legacy_install_flow = true` selects the URL-based scope/authorization flow implemented here; Shopify managed installation uses a different flow. Deploy from your linked Shopify app project with `shopify app deploy`, or release equivalent app-version settings in the Dev Dashboard. See Shopify's [app configuration reference](https://shopify.dev/docs/apps/build/cli-for-apps/app-configuration).
+
+```toml
+embedded = false
+
+[access_scopes]
+scopes = "write_products"
+use_legacy_install_flow = true
+
+[auth]
+redirect_urls = ["https://gateway.example.com/oauth/shopify/callback"]
+```
+
 This block prompts for credentials without echoing the secret or placing its value in command history. It configures the `acme` tenant created above; for the default tenant, read `TENANT_ID` from `.env` instead. Set `SHOPIFY_RETURN_URLS` to your client's exact HTTPS completion URL, or leave it empty to return the gateway's completion JSON.
 
 ```bash

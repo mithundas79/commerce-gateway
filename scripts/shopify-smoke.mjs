@@ -36,15 +36,16 @@ export function smokeConfig(env) {
 }
 
 export async function runShopifySmoke(env=process.env,dependencies={}) {
-  const config=smokeConfig(env),request=dependencies.fetch ?? globalThis.fetch,sleep=dependencies.sleep ?? pause;
+  const config=smokeConfig(env),request=dependencies.fetch ?? globalThis.fetch,sleep=dependencies.sleep ?? pause,now=dependencies.now ?? Date.now;
   const report={acceptance:'shopify-disposable-product',runId:config.runId,passed:false,restored:false,
     manualReconciliationRequired:false,temporaryOperationIds:[],restoreOperationId:null,error:null};
   const known=new Map(),releasedUncertain=new Set();let temporaryMayExist=false,unknownDispatch=false,mutationVerified=false,idempotencyVerified=false;
-  const http=async(path,init={},expected=200) => {
+  const http=async(path,init={},expected=200,deadline=Infinity) => {
     for(let attempt=0;attempt<3;attempt++) {
+      if(now()>=deadline) throw new SmokeError('OPERATION_STILL_PENDING');
       let response;
       try {response=await request(config.origin+path,{...init,redirect:'error',
-        headers:{authorization:`Bearer ${config.bearer}`,'content-type':'application/json',...init.headers},signal:AbortSignal.timeout(config.timeoutMs)});}
+        headers:{authorization:`Bearer ${config.bearer}`,'content-type':'application/json',...init.headers},signal:AbortSignal.timeout(Math.max(1,Math.min(config.timeoutMs,Math.ceil(deadline-now()))))});}
       catch {if(attempt<2) {await sleep(1000);continue;} throw new SmokeError('GATEWAY_REQUEST_UNCONFIRMED');}
       if(response.status===expected) {
         try {
@@ -92,16 +93,16 @@ export async function runShopifySmoke(env=process.env,dependencies={}) {
     return body;
   };
   const settle=async(id) => {
-    const attempts=Math.ceil(config.waitMs/config.pollMs)+1;
+    const attempts=Math.ceil(config.waitMs/config.pollMs)+1,deadline=now()+config.waitMs;
     for(let i=0;i<attempts;i++) {
-      const body=await http(`/v1/operations/${id}`),operation=body.operation;
+      const body=await http(`/v1/operations/${id}`,{},200,deadline),operation=body.operation;
       if(!operation || operation.id!==id || operation.connectionId!==config.connectionId || operation.kind!=='product_title_update') throw new SmokeError('INVALID_OPERATION_STATUS');
       if(terminal.has(operation.status)) {
         if(operation.status==='uncertain' && typeof operation.orderingReleasedAt==='string' && Number.isFinite(Date.parse(operation.orderingReleasedAt))) releasedUncertain.add(id);
         return operation.status;
       }
       if(!['queued','running','retry','recovering'].includes(operation.status)) throw new SmokeError('INVALID_OPERATION_STATUS');
-      if(i+1<attempts) await sleep(config.pollMs);
+      if(i+1<attempts) await sleep(Math.max(0,Math.min(config.pollMs,deadline-now())));
     }
     throw new SmokeError('OPERATION_STILL_PENDING');
   };

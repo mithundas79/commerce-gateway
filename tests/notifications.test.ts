@@ -3,7 +3,7 @@ import { createHmac } from 'node:crypto';
 import test from 'node:test';
 import type { Pool } from 'pg';
 import { configureNotificationEndpoint, disableNotificationEndpoint, isPublicAddress,
-  notificationSignature, resolveNotificationDestination, runNotificationOnce,
+  notificationSignature, resolveNotificationDestination, runNotificationOnce, startNotifications,
   validateNotificationUrl, type NotificationEvent, type NotificationOptions } from '../src/notifications.js';
 
 const now=Date.parse('2026-11-04T00:00:00Z');
@@ -142,4 +142,15 @@ test('admin configuration normalizes URLs, versions changes and never stores pla
   await disableNotificationEndpoint(pool,tenantId);assert.deepEqual(calls[1].values,[tenantId]);
   await assert.rejects(configureNotificationEndpoint(pool,{tenantId,url:'http://unsafe.example.com',secretCiphertext:'encrypted'}));
   assert.equal(calls.length,2);
+});
+
+test('notification loop reports healthy empty claims and immediately reports failed database claims',async() => {
+  const healthy=fixture();healthy.event.status='delivered';const healthyStop=new AbortController();let healthyCount=0;
+  await startNotifications({...healthy.options,signal:healthyStop.signal,onHealthy:() => {healthyCount++;healthyStop.abort();}});
+  assert.equal(healthyCount,1);
+  const failed=fixture(),failedStop=new AbortController();let failureCount=0,unexpectedHealthy=0;
+  failed.options.pool={query:async() => {throw new Error('database unavailable');}} as unknown as Pool;
+  await startNotifications({...failed.options,signal:failedStop.signal,onHealthy:() => {unexpectedHealthy++;},
+    onUnhealthy:() => {failureCount++;failedStop.abort();}});
+  assert.equal(failureCount,1);assert.equal(unexpectedHealthy,0);
 });

@@ -12,7 +12,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "start": "node dist/main.js",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "tsx --test tests/*.test.ts tests/*.test.mjs",
     "test:integration": "tsx --test --test-concurrency=1 tests/integration/*.test.ts",
     "bench": "node scripts/bench.mjs"
   },

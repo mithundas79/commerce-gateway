@@ -129,15 +129,17 @@ export class ShopifyOAuth {
     if (stored.returnUrl && !app.allowedReturnUrls.includes(stored.returnUrl)) throw new ConnectorError('VALIDATION', 'Return URL is no longer allowlisted', 400);
     const consumed = await this.options.states.consume(stateHash, bindingHash, shop, this.now());
     if (!consumed) throw new ConnectorError('AUTHENTICATION', 'OAuth state has already been used', 403);
+    let completedScopes = app.scopes;
     await this.options.tokens.withLock(`${stored.tenantId}:${shop}`, async () => {
       // Tenant configuration may have changed while waiting for another refresh.
       const lockedApp = await this.app(stored.tenantId);
-      if (!verifyOAuthHmac(input.query, lockedApp.clientSecret)) throw new ConnectorError('AUTHENTICATION', 'Shopify app credentials changed during authorization', 403);
+      if (lockedApp.clientId !== app.clientId || !verifyOAuthHmac(input.query, lockedApp.clientSecret)) throw new ConnectorError('AUTHENTICATION', 'Shopify app credentials changed during authorization', 403);
       if (stored.returnUrl && !lockedApp.allowedReturnUrls.includes(stored.returnUrl)) throw new ConnectorError('VALIDATION','Return URL is no longer allowlisted',400);
       const tokens = await this.exchange(shop, lockedApp, { code, expiring: '1' });
       await this.options.tokens.save(stored.tenantId, shop, tokens);
+      completedScopes = lockedApp.scopes;
     });
-    return { tenantId: stored.tenantId, shop, scopes: app.scopes, ...(stored.returnUrl ? { returnUrl: stored.returnUrl } : {}) };
+    return { tenantId: stored.tenantId, shop, scopes: completedScopes, ...(stored.returnUrl ? { returnUrl: stored.returnUrl } : {}) };
   }
 
   private async exchange(shop: string, app: ShopifyAppConfig, grant: Record<string, string>): Promise<OfflineTokens> {

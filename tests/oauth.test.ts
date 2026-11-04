@@ -4,6 +4,22 @@ import { createHmac } from 'node:crypto';
 import { ConnectorError } from '../src/shopify.js';
 import { ShopifyOAuth, hashOAuthValue, verifyOAuthHmac, verifyShopifyWebhook, type OAuthState, type OfflineTokens, type ShopifyAppConfig } from '../src/oauth.js';
 
+test('valid access tokens use a pooled read without taking a refresh lock or loading app secrets',async () => {
+  let reads = 0; let locks = 0;
+  const service = new ShopifyOAuth({
+    now:() => 1000,
+    getApp:async () => {throw new Error('App credentials must not be loaded for valid-token reads');},
+    states:{create:async () => {},get:async () => undefined,consume:async () => undefined},
+    tokens:{
+      get:async () => {reads++;return {accessToken:'valid-access',refreshToken:'unused-refresh',expiresAt:100_000,refreshTokenExpiresAt:200_000,scopes:['write_products']};},
+      save:async () => {throw new Error('Unexpected token save');},delete:async () => {},
+      withLock:async (_key,work) => {locks++;return work();},
+    },
+  });
+  assert.deepEqual(await Promise.all(Array.from({length:20},() => service.accessToken('tenant-a','demo.myshopify.com'))),Array(20).fill('valid-access'));
+  assert.equal(reads,20);assert.equal(locks,0);
+});
+
 const app: ShopifyAppConfig = { clientId: 'client', clientSecret: 'client-secret', redirectUri: 'https://gateway.example/oauth/callback', scopes: ['read_products', 'write_products'], allowedReturnUrls: ['https://client.example/connected'] };
 const browserBinding = 'secure-browser-cookie-at-least-32-bytes';
 const shop = 'demo.myshopify.com';

@@ -40,7 +40,6 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      - run: node --test tests/bench.test.mjs
       - run: npm run build
         id: build
       - run: npm run test:integration
