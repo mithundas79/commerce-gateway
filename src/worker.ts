@@ -98,7 +98,7 @@ export async function claimOperation(pool: Pick<Pool, 'query'>, leaseMs = 90_000
       JOIN connections c ON c.id = o.connection_id AND c.tenant_id = o.tenant_id
       WHERE ((o.status IN ('queued', 'retry', 'recovering') AND o.next_attempt_at <= clock_timestamp())
          OR (o.status = 'running' AND o.lease_until <= clock_timestamp()))
-        AND NOT c.lifecycle_hold
+        AND (NOT c.lifecycle_hold OR o.deadline_at <= clock_timestamp())
         AND (c.worker_not_before <= clock_timestamp() OR o.deadline_at <= clock_timestamp())
         AND (o.deadline_at <= clock_timestamp() OR NOT EXISTS (
           SELECT 1 FROM operations prior WHERE prior.tenant_id = o.tenant_id
