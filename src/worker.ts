@@ -95,7 +95,15 @@ export async function claimOperation(pool: Pick<Pool, 'query'>, leaseMs = 90_000
       WHERE ((o.status IN ('queued', 'retry', 'recovering') AND o.next_attempt_at <= clock_timestamp())
          OR (o.status = 'running' AND o.lease_until <= clock_timestamp()))
         AND (c.worker_not_before <= clock_timestamp() OR o.deadline_at <= clock_timestamp())
-      ORDER BY o.next_attempt_at, o.created_at, o.id
+        AND (o.deadline_at <= clock_timestamp() OR NOT EXISTS (
+          SELECT 1 FROM operations prior WHERE prior.tenant_id = o.tenant_id
+            AND prior.connection_id = o.connection_id AND prior.kind = o.kind
+            AND prior.payload->>'productId' = o.payload->>'productId'
+            AND prior.queue_sequence < o.queue_sequence
+            AND (prior.status IN ('queued','running','retry','recovering')
+              OR (prior.status = 'uncertain' AND prior.ordering_released_at IS NULL))
+        ))
+      ORDER BY o.next_attempt_at, o.queue_sequence
       FOR UPDATE OF o SKIP LOCKED LIMIT 1
     )
     UPDATE operations o SET status = 'running', attempt_count = attempt_count + 1,
@@ -194,6 +202,14 @@ export async function runWorkerOnce(options: WorkerOptions): Promise<boolean> {
         AND EXISTS (SELECT 1 FROM connections c WHERE c.id = operations.connection_id
           AND c.tenant_id = operations.tenant_id AND c.revoked_at IS NULL
           AND 'write_products' = ANY(c.scopes) AND c.worker_not_before <= clock_timestamp())
+        AND NOT EXISTS (
+          SELECT 1 FROM operations prior WHERE prior.tenant_id = operations.tenant_id
+            AND prior.connection_id = operations.connection_id AND prior.kind = operations.kind
+            AND prior.payload->>'productId' = operations.payload->>'productId'
+            AND prior.queue_sequence < operations.queue_sequence
+            AND (prior.status IN ('queued','running','retry','recovering')
+              OR (prior.status = 'uncertain' AND prior.ordering_released_at IS NULL))
+        )
       RETURNING id
     `, [operation.id, operation.tenant_id, operation.fence_token]);
     if (marked.rows.length === 0) {
@@ -226,6 +242,19 @@ export async function runWorkerOnce(options: WorkerOptions): Promise<boolean> {
     await retry(safeError(error));
   }
   return true;
+}
+
+/** Operator-only acknowledgement after reconciliation; it does not prove Shopify has no delayed request. */
+export async function releaseUncertainOperation(
+  pool: Pick<Pool, 'query'>,
+  input: { tenantId: string; operationId: string },
+): Promise<boolean> {
+  const result = await pool.query(`
+    UPDATE operations SET ordering_released_at = COALESCE(ordering_released_at, clock_timestamp()),
+      updated_at = clock_timestamp()
+    WHERE id = $1 AND tenant_id = $2 AND status = 'uncertain' RETURNING id
+  `, [input.operationId, input.tenantId]);
+  return result.rows.length === 1;
 }
 
 /** Graceful stop finishes the current bounded call, then stops claiming jobs. */

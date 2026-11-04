@@ -1,9 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, sep } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { Pool } from 'pg';
 import { encryptSecret, decryptSecret } from '../src/crypto.js';
-import { bootstrap, revokeApiKey, publicBaseUrl, runAdmin } from '../src/admin.js';
+import { bootstrap, migrate, revokeApiKey, publicBaseUrl, runAdmin } from '../src/admin.js';
 import { createRuntime, readBinding } from '../src/main.js';
 import { cleanupExpiredOAuth, PostgresStore } from '../src/store.js';
 
@@ -140,4 +144,36 @@ test('OAuth orphan cleanup uses a bounded database-time batch and preserves oper
   assert.ok(!sql.includes('operations'));
   await assert.rejects(cleanupExpiredOAuth(pool,0),/batch/);
   await assert.rejects(cleanupExpiredOAuth(pool,10001),/batch/);
+});
+
+test('migration registry and SQL failures cannot silently mark incompatible work as applied',async () => {
+  const directory = await mkdtemp(join(tmpdir(),'gateway-migrations-'));
+  const source = 'BEGIN;\nCREATE TABLE migration_probe(id integer);\nCOMMIT;\n';
+  await writeFile(join(directory,'001.sql'),source);
+  try {
+    for (const scenario of ['success','sql-failure','changed-checksum','newer-database','bad-envelope']) {
+      await writeFile(join(directory,'001.sql'),scenario === 'bad-envelope' ? 'SELECT 1;' : source);
+      const calls:string[] = [];
+      let released = false;
+      const client = {query:async (sql:string) => {
+        calls.push(sql);
+        if (sql === 'SELECT name,sha256 FROM schema_migrations') return {rows:scenario === 'changed-checksum' ? [{name:'001.sql',sha256:'wrong'}] : scenario === 'newer-database' ? [{name:'999.sql',sha256:'future'}] : []};
+        if (scenario === 'sql-failure' && sql.includes('CREATE TABLE migration_probe')) throw new Error('permission denied');
+        return {rows:[]};
+      },release() {released=true;}};
+      const pool = {connect:async () => client} as unknown as Pool;
+      const work = migrate(pool,pathToFileURL(directory+sep));
+      if (scenario === 'success') {
+        await work;
+        assert.ok(calls.indexOf('BEGIN') < calls.findIndex(sql => sql.includes('CREATE TABLE migration_probe')));
+        assert.ok(calls.findIndex(sql => sql.startsWith('INSERT INTO schema_migrations')) < calls.indexOf('COMMIT'));
+      } else {
+        await assert.rejects(work);
+        assert.ok(!calls.some(sql => sql.startsWith('INSERT INTO schema_migrations')));
+        if (scenario === 'sql-failure' || scenario === 'bad-envelope') assert.ok(calls.includes('ROLLBACK'));
+      }
+      assert.equal(released,true);
+      assert.match(calls.at(-1)!,/pg_advisory_unlock/);
+    }
+  } finally {await rm(directory,{recursive:true,force:true});}
 });

@@ -51,10 +51,12 @@ function publicOperation(row: Record<string, any>) {
     error: row.error ? { code: typeof row.error.code === 'string' && /^[A-Z0-9_]{1,80}$/i.test(row.error.code) ? row.error.code : 'OPERATION_FAILED' } : null,
     createdAt: row.created_at, updatedAt: row.updated_at,
     completedAt: row.completed_at ?? null,
+    orderingReleasedAt: row.ordering_released_at ?? null,
+    ...(Object.hasOwn(row, 'blocked_by') ? { blockedBy: row.blocked_by ?? null } : {}),
   };
 }
 
-const operationColumns = 'id, connection_id, kind, status, attempt_count, payload, result, error, created_at, updated_at, completed_at';
+const operationColumns = 'id, connection_id, kind, status, attempt_count, payload, result, error, created_at, updated_at, completed_at, ordering_released_at';
 
 export function buildApi(options: ApiOptions): FastifyInstance {
   const { pool } = options;
@@ -225,7 +227,16 @@ export function buildApi(options: ApiOptions): FastifyInstance {
     { schema: { params: { type: 'object', additionalProperties: false, required: ['operationId'], properties: { operationId: { type: 'string', format: 'uuid' } } } } },
     async (request, reply) => {
       const result = await pool.query(
-        `SELECT ${operationColumns} FROM operations WHERE tenant_id = $1 AND id = $2`,
+        `SELECT ${operationColumns}, (
+          SELECT jsonb_build_object('operationId', blocker.id, 'status', blocker.status)
+          FROM operations blocker WHERE blocker.tenant_id = operations.tenant_id
+            AND blocker.connection_id = operations.connection_id AND blocker.kind = operations.kind
+            AND blocker.payload->>'productId' = operations.payload->>'productId'
+            AND blocker.queue_sequence < operations.queue_sequence
+            AND (blocker.status IN ('queued','running','retry','recovering')
+              OR (blocker.status = 'uncertain' AND blocker.ordering_released_at IS NULL))
+          ORDER BY blocker.queue_sequence LIMIT 1
+        ) AS blocked_by FROM operations WHERE tenant_id = $1 AND id = $2`,
         [getTenantId(request), request.params.operationId],
       );
       if (!result.rows[0]) return reply.code(404).send({ error: 'OPERATION_NOT_FOUND' });

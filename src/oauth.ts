@@ -130,7 +130,11 @@ export class ShopifyOAuth {
     const consumed = await this.options.states.consume(stateHash, bindingHash, shop, this.now());
     if (!consumed) throw new ConnectorError('AUTHENTICATION', 'OAuth state has already been used', 403);
     await this.options.tokens.withLock(`${stored.tenantId}:${shop}`, async () => {
-      const tokens = await this.exchange(shop, app, { code, expiring: '1' });
+      // Tenant configuration may have changed while waiting for another refresh.
+      const lockedApp = await this.app(stored.tenantId);
+      if (!verifyOAuthHmac(input.query, lockedApp.clientSecret)) throw new ConnectorError('AUTHENTICATION', 'Shopify app credentials changed during authorization', 403);
+      if (stored.returnUrl && !lockedApp.allowedReturnUrls.includes(stored.returnUrl)) throw new ConnectorError('VALIDATION','Return URL is no longer allowlisted',400);
+      const tokens = await this.exchange(shop, lockedApp, { code, expiring: '1' });
       await this.options.tokens.save(stored.tenantId, shop, tokens);
     });
     return { tenantId: stored.tenantId, shop, scopes: app.scopes, ...(stored.returnUrl ? { returnUrl: stored.returnUrl } : {}) };
@@ -161,7 +165,12 @@ export class ShopifyOAuth {
 
   async accessToken(tenantId: string, shop: string): Promise<string> {
     validateShop(shop);
+    // Normal reads use one short pooled query and never wait behind token refresh HTTP.
+    const available = await this.options.tokens.get(tenantId,shop);
+    if (!available) throw new ConnectorError('AUTHENTICATION','Shop authorization required',401);
+    if (available.expiresAt > this.now()+60_000) return available.accessToken;
     return this.options.tokens.withLock(`${tenantId}:${shop}`, async () => {
+      // A different process may already have completed rotation while we waited.
       const current = await this.options.tokens.get(tenantId, shop);
       if (!current) throw new ConnectorError('AUTHENTICATION', 'Shop authorization required', 401);
       if (current.expiresAt > this.now() + 60_000) return current.accessToken;

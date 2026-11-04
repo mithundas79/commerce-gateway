@@ -94,7 +94,7 @@ export async function main(env = process.env): Promise<void> {
   pool.on('error', () => { console.error('Database pool connection failed'); });
   const { app,provider } = createRuntime(pool,master,base,env.NODE_ENV !== 'test');
   const stop = new AbortController();
-  const shutdown = () => { stop.abort(); if (role === 'api') void app.close(); };
+  const shutdown = () => { stop.abort(); };
   process.once('SIGTERM',shutdown); process.once('SIGINT',shutdown);
   try {
     await pool.query('SELECT 1');
@@ -133,7 +133,7 @@ export async function main(env = process.env): Promise<void> {
     }
   } finally {
     process.removeListener('SIGTERM',shutdown); process.removeListener('SIGINT',shutdown);
-    await app.close(); await pool.end();
+    try { await app.close(); } finally { await pool.end(); }
   }
 }
 

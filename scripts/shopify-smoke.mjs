@@ -39,7 +39,7 @@ export async function runShopifySmoke(env=process.env,dependencies={}) {
   const config=smokeConfig(env),request=dependencies.fetch ?? globalThis.fetch,sleep=dependencies.sleep ?? pause;
   const report={acceptance:'shopify-disposable-product',runId:config.runId,passed:false,restored:false,
     manualReconciliationRequired:false,temporaryOperationIds:[],restoreOperationId:null,error:null};
-  const known=new Map();let temporaryMayExist=false,unknownDispatch=false,mutationVerified=false,idempotencyVerified=false;
+  const known=new Map(),releasedUncertain=new Set();let temporaryMayExist=false,unknownDispatch=false,mutationVerified=false,idempotencyVerified=false;
   const http=async(path,init={},expected=200) => {
     for(let attempt=0;attempt<3;attempt++) {
       let response;
@@ -96,7 +96,10 @@ export async function runShopifySmoke(env=process.env,dependencies={}) {
     for(let i=0;i<attempts;i++) {
       const body=await http(`/v1/operations/${id}`),operation=body.operation;
       if(!operation || operation.id!==id || operation.connectionId!==config.connectionId || operation.kind!=='product_title_update') throw new SmokeError('INVALID_OPERATION_STATUS');
-      if(terminal.has(operation.status)) return operation.status;
+      if(terminal.has(operation.status)) {
+        if(operation.status==='uncertain' && typeof operation.orderingReleasedAt==='string' && Number.isFinite(Date.parse(operation.orderingReleasedAt))) releasedUncertain.add(id);
+        return operation.status;
+      }
       if(!['queued','running','retry','recovering'].includes(operation.status)) throw new SmokeError('INVALID_OPERATION_STATUS');
       if(i+1<attempts) await sleep(config.pollMs);
     }
@@ -118,6 +121,7 @@ export async function runShopifySmoke(env=process.env,dependencies={}) {
     idempotencyVerified=true;
     const status=await settle(first.operation.id);known.set(first.operation.id,status);
     if(status==='failed') throw new SmokeError('TEMPORARY_OPERATION_FAILED');
+    if(status==='uncertain' && !releasedUncertain.has(first.operation.id)) throw new SmokeError('UNCERTAIN_OPERATION_REQUIRES_ADMIN_RELEASE');
     if(await readTitle()!==config.temporaryTitle) throw new SmokeError(status==='uncertain'?'TEMPORARY_OUTCOME_UNRECONCILED':'TEMPORARY_READBACK_MISMATCH');
     mutationVerified=true;
   } catch(error) {report.error=error instanceof SmokeError?error.code:'SMOKE_STEP_FAILED';}
@@ -133,6 +137,7 @@ export async function runShopifySmoke(env=process.env,dependencies={}) {
           if([...known.values()].includes('uncertain')) throw new SmokeError('TEMPORARY_OUTCOME_UNRECONCILED');
           report.restored=true;
         } else if(current===config.temporaryTitle) {
+          if([...known].some(([id,status]) => status==='uncertain' && !releasedUncertain.has(id))) throw new SmokeError('UNCERTAIN_OPERATION_REQUIRES_ADMIN_RELEASE');
           // A unique run marker reconciles an uncertain terminal write. All known
           // temporary jobs are terminal before restoration is ever enqueued.
           const restored=await enqueue(config.originalTitle,'restore');report.restoreOperationId=restored.operation.id;

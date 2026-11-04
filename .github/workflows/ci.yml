@@ -42,10 +42,14 @@ jobs:
       - run: npm test
       - run: node --test tests/bench.test.mjs
       - run: npm run build
+        id: build
       - run: npm run test:integration
       - name: Measure local gateway overhead
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: BENCH_DATABASE_URL="$DATABASE_URL" npm run bench
       - name: Verify release archive
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node scripts/verify-package.mjs
       - name: Build container
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: docker build --tag commerce-gateway:ci .

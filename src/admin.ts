@@ -5,6 +5,7 @@ import { Pool } from 'pg';
 import { encryptSecret, validateMasterKey } from './crypto.js';
 import { PostgresStore } from './store.js';
 import { configureNotificationEndpoint, disableNotificationEndpoint } from './notifications.js';
+import { releaseUncertainOperation } from './worker.js';
 
 export const help = `Commerce Gateway administration
   migrate                 Apply checksummed SQL migrations (DATABASE_URL)
@@ -15,6 +16,8 @@ export const help = `Commerce Gateway administration
                           optional SHOPIFY_RETURN_URLS (comma-separated), PUBLIC_BASE_URL, MASTER_KEY
   configure-notification Store completion webhook (TENANT_ID, NOTIFICATION_URL, NOTIFICATION_SECRET, MASTER_KEY)
   disable-notification   Disable completion webhook for TENANT_ID
+  release-uncertain      Release a product ordering hold after operator reconciliation
+                          TENANT_ID, OPERATION_ID, ACKNOWLEDGE_DELAYED_WRITE_RISK=true
   --help                  Show this help
 Secrets are accepted through environment variables and never printed.`;
 
@@ -43,18 +46,23 @@ export async function migrate(pool: Pool, directory = new URL('../migrations/', 
     await client.query('CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())');
     const files = (await readdir(directory)).filter(name => /^\d+\.sql$/.test(name)).sort();
     if (!files.length) throw new Error('No SQL migrations were found');
+    const applied = await client.query<{name:string;sha256:string}>('SELECT name,sha256 FROM schema_migrations');
+    const checksums = new Map(applied.rows.map(row => [row.name,row.sha256]));
+    if (applied.rows.some(row => !files.includes(row.name))) throw new Error('Database has migrations absent from this build; use a compatible gateway version');
     for (const name of files) {
       const sql = await readFile(new URL(name, directory), 'utf8');
       const checksum = createHash('sha256').update(sql).digest('hex');
-      const existing = await client.query('SELECT sha256 FROM schema_migrations WHERE name=$1', [name]);
-      if (existing.rows[0]) {
-        if (existing.rows[0].sha256 !== checksum) throw new Error(`Applied migration checksum differs: ${name}`);
+      const existing = checksums.get(name);
+      if (existing !== undefined) {
+        if (existing !== checksum) throw new Error(`Applied migration checksum differs: ${name}`);
         continue;
       }
       await client.query('BEGIN');
       try {
         // SQL files can also be applied directly; the runner owns this transaction.
-        await client.query(sql.replace(/^\s*BEGIN\s*;/i, '').replace(/COMMIT\s*;\s*$/i, ''));
+        const transaction = /^\s*BEGIN\s*;([\s\S]*)COMMIT\s*;\s*$/i.exec(sql);
+        if (!transaction) throw new Error(`Migration requires a BEGIN/COMMIT envelope: ${name}`);
+        await client.query(transaction[1]!);
         await client.query('INSERT INTO schema_migrations (name,sha256) VALUES ($1,$2)', [name,checksum]);
         await client.query('COMMIT');
       } catch (error) { await client.query('ROLLBACK'); throw error; }
@@ -91,7 +99,7 @@ export async function revokeApiKey(pool: Pool, env: NodeJS.ProcessEnv): Promise<
 
 export async function runAdmin(args: string[], env = process.env): Promise<void> {
   if (args.length === 0 || args.length === 1 && ['--help','-h','help'].includes(args[0]!)) { console.log(help); return; }
-  if (args.length !== 1 || !['migrate','bootstrap','revoke-api-key','configure-shopify','configure-notification','disable-notification'].includes(args[0]!)) throw new Error('Unknown command; use --help');
+  if (args.length !== 1 || !['migrate','bootstrap','revoke-api-key','configure-shopify','configure-notification','disable-notification','release-uncertain'].includes(args[0]!)) throw new Error('Unknown command; use --help');
   const pool = new Pool({ connectionString: required(env,'DATABASE_URL'), connectionTimeoutMillis: 10_000 });
   try {
     switch (args[0]) {
@@ -118,6 +126,13 @@ export async function runAdmin(args: string[], env = process.env): Promise<void>
         break;
       }
       case 'disable-notification': await disableNotificationEndpoint(pool,tenantId(env)); break;
+      case 'release-uncertain': {
+        const operation = required(env,'OPERATION_ID');
+        if (!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(operation)) throw new Error('OPERATION_ID must be a UUID');
+        if (env.ACKNOWLEDGE_DELAYED_WRITE_RISK !== 'true') throw new Error('Reconcile the delayed provider write and set ACKNOWLEDGE_DELAYED_WRITE_RISK=true');
+        if (!await releaseUncertainOperation(pool,{tenantId:tenantId(env),operationId:operation.toLowerCase()})) throw new Error('An uncertain operation was not found for this tenant');
+        break;
+      }
     }
     console.log('Administration command completed');
   } finally { await pool.end(); }
