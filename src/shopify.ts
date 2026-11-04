@@ -97,11 +97,15 @@ export class ShopifyConnector {
   async listProducts(input: ShopifyCredentials & { first?: number; after?: string }) {
     const first = input.first ?? 50;
     if (!Number.isInteger(first) || first < 1 || first > 100 || (input.after !== undefined && (typeof input.after !== 'string' || input.after.length > 2048))) throw new ConnectorError('VALIDATION', 'Invalid product pagination', 400);
-    const data = await this.graphql(input, `query Products($first: Int!, $after: String) { products(first: $first, after: $after, sortKey: ID) { nodes { id title updatedAt } pageInfo { hasNextPage endCursor } } }`, { first, after: input.after ?? null }, false);
+    const data = await this.graphql(input, `query Products($first: Int!, $after: String) { products(first: $first, after: $after, sortKey: ID) { nodes { id title updatedAt status } pageInfo { hasNextPage endCursor } } }`, { first, after: input.after ?? null }, false);
     try {
       const page = data.products.pageInfo;
       if (!Array.isArray(data.products.nodes) || typeof page.hasNextPage !== 'boolean' || (page.endCursor !== null && typeof page.endCursor !== 'string')) throw new Error();
-      return { products: data.products.nodes.map(product) as ShopifyProduct[], pageInfo: { hasNextPage: page.hasNextPage as boolean, endCursor: page.endCursor as string | null } };
+      const products = data.products.nodes.map((value: any) => {
+        if (typeof value?.status !== 'string' || !value.status) throw new Error();
+        return { ...product(value), status: value.status as string };
+      });
+      return { products, pageInfo: { hasNextPage: page.hasNextPage as boolean, endCursor: page.endCursor as string | null } };
     } catch { throw new ConnectorError('TRANSIENT', 'Malformed Shopify product list', 502, true); }
   }
 

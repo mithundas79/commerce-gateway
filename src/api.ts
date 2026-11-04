@@ -13,7 +13,7 @@ export interface Connection {
 }
 
 export interface ProductPage {
-  products: Array<{ id: string; title: string; updatedAt: string }>;
+  products: Array<{ id: string; title: string; updatedAt: string; status: string }>;
   pageInfo: { hasNextPage: boolean; endCursor: string | null };
 }
 

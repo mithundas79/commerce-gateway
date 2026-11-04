@@ -152,7 +152,7 @@ test('runtime API responses match the published health, tenant, mutation and pro
     if (sql.includes('FROM connections')) return { rows: !values[1] || values[1] === connectionId ? [connection] : [] };
     throw new Error(`Unexpected SQL: ${sql}`);
   } };
-  const page = { products: [{ id: 'gid://shopify/Product/123', title: 'Sample', updatedAt: now }], pageInfo: { hasNextPage: false, endCursor: null } };
+  const page = { products: [{ id: 'gid://shopify/Product/123', title: 'Sample', status: 'DRAFT', updatedAt: now }], pageInfo: { hasNextPage: false, endCursor: null } };
   const app = buildApi({ pool, readProducts: async () => {
     if (providerError) throw providerError;
     return page;

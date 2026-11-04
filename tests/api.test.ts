@@ -13,7 +13,7 @@ const keyA = 'test_api_key_for_tenant_a';
 const keyB = 'test_api_key_for_tenant_b';
 const auth = (key = keyA) => ({ authorization: `Bearer ${key}` });
 const payload = { productId: 'gid://shopify/Product/123', title: 'New product title' };
-const page: ProductPage = { products: [{ id: payload.productId, title: 'Current title', updatedAt: '2026-11-04T00:00:00Z' }], pageInfo: { hasNextPage: false, endCursor: null } };
+const page: ProductPage = { products: [{ id: payload.productId, title: 'Current title', status: 'DRAFT', updatedAt: '2026-11-04T00:00:00Z' }], pageInfo: { hasNextPage: false, endCursor: null } };
 
 function fixture() {
   const hashes = new Map([[createHash('sha256').update(keyA).digest('hex'), tenantA], [createHash('sha256').update(keyB).digest('hex'), tenantB]]);

@@ -81,6 +81,7 @@ export async function runShopifySmoke(env=process.env,dependencies={}) {
   const readTitle=async() => {
     const product=await find('products',config.productId);
     if(!product || typeof product.title!=='string') throw new SmokeError('EXACT_PRODUCT_NOT_FOUND');
+    if(product.status!=='DRAFT') throw new SmokeError('DRAFT_PRODUCT_REQUIRED');
     return product.title;
   };
   const enqueue=async(title,phase) => {
