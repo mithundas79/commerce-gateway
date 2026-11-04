@@ -80,9 +80,14 @@ async function fixture() {
     async function accumulate(entries: Array<[string, string?]>) {
       const head = submit('immediate');
       await until(() => !state.first, 'The first enqueue did not start immediately');
-      const rest = entries.map(([key, title]) => submit(key, title));
-      await until(() => state.lookups >= entries.length, 'Concurrent enqueues did not accumulate');
-      await new Promise<void>(resolve => setImmediate(resolve));
+      const rest: ReturnType<typeof submit>[] = [];
+      // HTTP authorization and replay lookups can finish out of submission order.
+      // Admit each waiter before the next, keeping every response blocked behind the head.
+      for (const [key, title] of entries) {
+        rest.push(submit(key, title));
+        await until(() => state.lookups >= rest.length, 'Concurrent enqueues did not accumulate');
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
       return { head, rest };
     }
     return { pool, tenant, connection, state, first, commit, submit, accumulate,

@@ -9,6 +9,7 @@ type Entry = {
 };
 type Group = { pending: Entry[] };
 const batchLimit = 16;
+const groupLimit = 64;
 
 /** Coalesce arrivals behind an active enqueue, retaining the database ordering protocol. */
 export function createEnqueue(pool: Pool, operationColumns: string, ttlMs: number) {
@@ -79,6 +80,10 @@ export function createEnqueue(pool: Pool, operationColumns: string, ttlMs: numbe
         // Bound retained batching state. Excess arrivals keep the original single-insert path.
         if (active.pending.length < batchLimit) active.pending.push(entry);
         else void insert(pool, entry).then(resolve, reject);
+        return;
+      }
+      if (groups.size >= groupLimit) {
+        void insert(pool, entry).then(resolve, reject);
         return;
       }
       const group = { pending: [entry] };
