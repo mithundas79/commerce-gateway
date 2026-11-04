@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS shopify_lifecycle_events (
   shop text,
   status text NOT NULL CHECK (status IN ('pending','processed','ignored','action_required')),
   attempt_count integer NOT NULL DEFAULT 0,
+  fence_token bigint NOT NULL DEFAULT 0,
   next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   last_error text,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),

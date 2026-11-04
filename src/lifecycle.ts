@@ -33,7 +33,7 @@ function identity(payload: any, topic: Topic): { shopId: string; shop?: string }
 
 interface LifecycleEvent {
   id: string; client_id: string; topic: Topic; generation: string; tenant_id: string;
-  connection_id: string; shop: string; status: string; attempt_count: number;
+  connection_id: string; shop: string; status: string; attempt_count: number; fence_token: string;
 }
 
 export class ShopifyLifecycle {
@@ -96,6 +96,7 @@ export class ShopifyLifecycle {
   /** Proof runs outside DB transactions. The generation is checked again before any deletion. */
   async process(id: string): Promise<void> {
     const event = (await this.pool.query<LifecycleEvent>(`UPDATE shopify_lifecycle_events SET attempt_count=attempt_count+1,
+      fence_token=fence_token+1,
       next_attempt_at=clock_timestamp()+interval '1 minute',updated_at=clock_timestamp()
       WHERE id=$1 AND status='pending' AND next_attempt_at<=clock_timestamp() RETURNING *`,[id])).rows[0];
     if (!event) return;
@@ -128,12 +129,14 @@ export class ShopifyLifecycle {
       const code = error instanceof ConnectorError ? error.code : 'TRANSIENT';
       const actionRequired = code === 'AUTHENTICATION' || event.attempt_count >= 8;
       await this.pool.query(`UPDATE shopify_lifecycle_events SET status=$2,last_error=$3,updated_at=clock_timestamp()
-        WHERE id=$1 AND status='pending'`,[event.id,actionRequired ? 'action_required' : 'pending',code]);
+        WHERE id=$1 AND status='pending' AND fence_token=$4`,[event.id,actionRequired ? 'action_required' : 'pending',code,event.fence_token]);
     }
   }
 
   private async complete(event: LifecycleEvent, inactive: boolean, status: 'processed'|'ignored',tokenSnapshot?: string): Promise<void> {
     await this.transaction(event.tenant_id,async db => {
+      const receipt=(await db.query('SELECT status,fence_token FROM shopify_lifecycle_events WHERE id=$1 FOR UPDATE',[event.id])).rows[0];
+      if (receipt?.status!=='pending' || receipt.fence_token!==event.fence_token) return;
       const current = (await db.query(`SELECT c.authorization_generation,c.token_ciphertext,a.client_id FROM connections c
         JOIN shopify_apps a ON a.tenant_id=c.tenant_id WHERE c.id=$1 AND c.tenant_id=$2 FOR UPDATE OF c`,[event.connection_id,event.tenant_id])).rows[0];
       const sameInstallation = current?.authorization_generation === event.generation && current.client_id === event.client_id;

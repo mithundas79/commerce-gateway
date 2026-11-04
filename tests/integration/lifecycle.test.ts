@@ -222,3 +222,22 @@ test('indexed topic capabilities bound secret lookups with 1000 tenants sharing 
     assert.equal((await f.send('app-uninstalled',{id:123,myshopify_domain:shop})).statusCode,200);assert.equal(loads,2);
   } finally {globalThis.fetch=original;await f.close();}
 });
+
+test('a reclaimed lifecycle receipt fences a stalled processor and preserves the completed receipt',async () => {
+  const f=await fixture();const original=globalThis.fetch;let requests=0;
+  let entered!:()=>void;let release!:()=>void;
+  const started=new Promise<void>(resolve => {entered=resolve;});
+  const blocked=new Promise<void>(resolve => {release=resolve;});
+  globalThis.fetch=async () => {requests++;if(requests===1){entered();await blocked;}return new Response('{}',{status:401});};
+  try {
+    const delivered=f.send('app-uninstalled',{id:123,myshopify_domain:shop});
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    try {await Promise.race([started,delivered.then(response => {throw new Error(`Receipt finished before proof: ${response.statusCode}`);}),new Promise<never>((_,reject) => {timer=setTimeout(() => reject(new Error('Stalled proof did not begin')),10000);})]);}
+    finally {if(timer) clearTimeout(timer);}
+    await f.pool.query(`UPDATE shopify_lifecycle_events SET next_attempt_at='-infinity'`);
+    await f.runtime.lifecycle.reconcile();release();await delivered;
+    const event=(await f.pool.query('SELECT status,fence_token,attempt_count FROM shopify_lifecycle_events')).rows[0];
+    assert.equal(event.status,'processed');assert.equal(Number(event.fence_token),2);assert.equal(event.attempt_count,2);assert.equal(requests,2);
+    assert.equal((await f.pool.query('SELECT token_ciphertext FROM connections')).rows[0].token_ciphertext,'');
+  } finally {release?.();globalThis.fetch=original;await f.close();}
+});
