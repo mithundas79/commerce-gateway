@@ -80,10 +80,22 @@ export function createRuntime(pool: Pool, masterKey: string, baseUrl: string, lo
 
   async function credentials(context: ProductContext) {
     context.signal.throwIfAborted();
-    const row = (await pool.query('SELECT shop FROM connections WHERE tenant_id=$1 AND id=$2 AND revoked_at IS NULL AND NOT lifecycle_hold AND \'write_products\'=ANY(scopes)', [context.tenantId,context.connectionId])).rows[0];
+    const row = (await pool.query('SELECT shop,authorization_generation FROM connections WHERE tenant_id=$1 AND id=$2 AND revoked_at IS NULL AND NOT lifecycle_hold AND \'write_products\'=ANY(scopes)', [context.tenantId,context.connectionId])).rows[0];
     if (!row) throw new ConnectorError('PERMISSION','Connection is not authorized',403);
+    if (context.authorizationGeneration && context.authorizationGeneration!==row.authorization_generation) throw new ConnectorError('PERMISSION','Operation authorization changed',403);
     const accessToken = await oauth.accessToken(context.tenantId,row.shop);
     context.signal.throwIfAborted();
+    if (context.operationId) {
+      // Refresh can wait on network or another authorization. Recheck the lease after that wait.
+      const lease=await pool.query(`SELECT o.id FROM operations o JOIN connections c ON c.id=o.connection_id AND c.tenant_id=o.tenant_id
+        WHERE o.id=$1 AND o.tenant_id=$2 AND o.connection_id=$3 AND o.fence_token=$4
+          AND o.status='running' AND o.lease_until>clock_timestamp()
+          AND c.revoked_at IS NULL AND NOT c.lifecycle_hold AND 'write_products'=ANY(c.scopes)
+          AND c.authorization_generation=$5`,
+      [context.operationId,context.tenantId,context.connectionId,context.fenceToken,context.authorizationGeneration ?? row.authorization_generation]);
+      if (!lease.rows.length) throw new ConnectorError('PERMISSION','Operation is not authorized',403);
+      context.signal.throwIfAborted();
+    }
     return { shop:row.shop as string, accessToken, productId:context.productId, signal:context.signal };
   }
   const provider = {

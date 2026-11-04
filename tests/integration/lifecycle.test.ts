@@ -162,6 +162,12 @@ test('a concurrent reinstall supersedes an old provider proof and a later identi
     assert.equal(current.authorization_generation,reinstalled.authorization_generation);assert.equal(current.revoked_at,null);assert.equal(current.lifecycle_hold,false);
     const superseded=(await f.pool.query('SELECT status,error FROM operations WHERE id=$1',[queued])).rows[0];
     assert.equal(superseded.status,'failed');assert.equal(superseded.error.code,'SHOPIFY_AUTHORIZATION_CHANGED');
+    await assert.rejects(f.runtime.provider.updateProductTitle({tenantId:f.tenant,connectionId:f.connection.id,
+      productId:'gid://shopify/Product/1',title:'A fenced worker must not use reinstall credentials',
+      operationId:queued,fenceToken:0,signal:new AbortController().signal}),/Operation is not authorized/);
+    await assert.rejects(f.runtime.provider.updateProductTitle({tenantId:f.tenant,connectionId:f.connection.id,
+      productId:'gid://shopify/Product/1',title:'An old authorization must not acquire new credentials',
+      authorizationGeneration:f.connection.authorization_generation,signal:new AbortController().signal}),/Operation authorization changed/);
     // A first-seen old event delivered to the new installation is harmless while its token works.
     globalThis.fetch=async () => new Response(JSON.stringify({data:{shop:{id:'gid://shopify/Shop/123',myshopifyDomain:shop}}}));
     await f.send('app-uninstalled',payload);
