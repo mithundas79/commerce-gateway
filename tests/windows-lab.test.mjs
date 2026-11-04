@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { browserStart, completedRunStatus, labOptions, localGatewayFetch, shopifySettings } from '../release/windows-lab.mjs';
+import { spawnSync } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { browserStart, completedRunStatus, labOptions, localGatewayFetch, runLab, shopifySettings } from '../release/windows-lab.mjs';
 
 const argumentsForLab=['--settings','C:/private/source.env','--origin','https://gateway.example.com',
   '--shop','disposable.myshopify.com','--bash','C:/Program Files/Git/bin/bash.exe'];
@@ -49,6 +54,83 @@ test('mutation input reuses all existing smoke guards before installation',()=>{
     const args=[...mutation];args[index]=value;assert.throws(()=>labOptions(args));
   }
   assert.throws(()=>labOptions([...argumentsForLab,'--mutate']));
+});
+
+test('prepare-only rejects every mutation and recovery argument before installation',()=>{
+  assert.equal(labOptions([...argumentsForLab,'--prepare-only'])['--prepare-only'],true);
+  for(const args of [['--mutate'],['--resume'],['--new-run'],['--ack','disposable.myshopify.com'],['--product','gid://shopify/Product/123'],['--title','Exact title']]) {
+    assert.throws(()=>labOptions([...argumentsForLab,'--prepare-only',...args]),/PREPARE_ONLY_CONFLICTS_WITH_MUTATION_OR_RECOVERY/);
+  }
+});
+
+test('prepare-only executes setup and exits before OAuth, browser, polling, and smoke',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'commerce-gateway-prepare-test-'));
+  t.after(async()=>{
+    assert.equal(dirname(resolve(directory)),resolve(tmpdir()));
+    await rm(directory,{recursive:true,force:true});
+  });
+  const tenant='11111111-1111-4111-8111-111111111111',bearer='a'.repeat(64);
+  await mkdir(join(directory,'.secrets'));
+  await writeFile(join(directory,'.env'),`TENANT_ID=${tenant}\nHOST_PORT=3000\n`);
+  await writeFile(join(directory,'.secrets/bootstrap-api-key'),bearer);
+  const settings=join(directory,'shopify-settings.env');
+  await writeFile(settings,'SHOPIFY_CLIENT_ID=offline-app-id\nSHOPIFY_CLIENT_SECRET=offline-app-secret\nUNRELATED=ignore-this-value\n');
+  const args=[...argumentsForLab,'--prepare-only'];args[1]=settings;
+  const stages=[],reports=[];
+  t.mock.method(console,'log',value=>reports.push(JSON.parse(value)));
+  t.mock.method(globalThis,'fetch',async(url,init)=>{
+    assert.equal(url,'https://gateway.example.com/readyz');
+    assert.equal(init.headers.authorization,undefined);
+    assert.equal(init.redirect,'error');
+    stages.push('public-ready');return new Response('{}');
+  });
+  const command=async(name,args,options)=>{
+    if(name===argumentsForLab[7]) {assert.equal(options.capture,true);stages.push('install');return '';}
+    assert.equal(name,'docker');
+    if(args[0]==='ps' || args[0]==='volume') return '';
+    const admin=args.at(-1);
+    assert.ok(['migrate','bootstrap','configure-shopify'].includes(admin));stages.push(admin);
+    if(admin==='bootstrap') assert.equal(options.env.API_KEY,bearer);
+    if(admin==='configure-shopify') {
+      assert.equal(options.env.SHOPIFY_CLIENT_SECRET,'offline-app-secret');
+      assert.equal(options.env.UNRELATED,undefined);
+      assert.equal(options.env.SHOPIFY_RETURN_URLS,'');
+    }
+    assert.equal(args.includes(bearer),false);
+    assert.equal(args.includes('offline-app-secret'),false);
+    return '';
+  };
+  const report=await runLab(labOptions(args),{root:directory,platform:'win32',execute:command});
+  assert.deepEqual(stages,['install','migrate','bootstrap','public-ready','configure-shopify']);
+  assert.deepEqual(report,{acceptance:'windows-disposable-lab-setup',prepared:true,callbackUrl:'https://gateway.example.com/oauth/shopify/callback'});
+  assert.deepEqual(reports,[report]);
+  assert.deepEqual(await readdir(join(directory,'.secrets')),['bootstrap-api-key']);
+  assert.equal((await readFile(join(directory,'.env'),'utf8')).includes('offline-app-secret'),false);
+  const statePath=join(directory,'.secrets/windows-lab-run.json');
+  const completedState={smokeStarted:true,report:{passed:true,restored:true}};
+  await writeFile(statePath,JSON.stringify(completedState));
+  stages.length=0;reports.length=0;
+  assert.deepEqual(await runLab(labOptions(args),{root:directory,platform:'win32',execute:command}),report);
+  assert.deepEqual(stages,['install','migrate','bootstrap','public-ready','configure-shopify']);
+  assert.deepEqual(JSON.parse(await readFile(statePath,'utf8')),completedState);
+  await writeFile(statePath,JSON.stringify({smokeStarted:true,report:{passed:false,restored:false}}));
+  stages.length=0;reports.length=0;
+  await assert.rejects(runLab(labOptions(args),{root:directory,platform:'win32',execute:command}),/PRIOR_RUN_REQUIRES_EXPLICIT_RESUME_AND_RECONCILIATION/);
+  assert.deepEqual(stages,[]);
+  assert.deepEqual(reports,[]);
+});
+
+test('PowerShell prepare-only wrapper preserves its handoff and rejects conflicting parameters',{skip:process.platform!=='win32'},()=>{
+  const repo=resolve(dirname(fileURLToPath(import.meta.url)),'..');
+  const invoke=args=>spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass',...args],{cwd:repo,encoding:'utf8',windowsHide:true});
+  const prepared=invoke(['-File','tests/windows-lab-wrapper.test.ps1','-PrepareOnly']);
+  assert.equal(prepared.status,0);
+  assert.match(prepared.stdout,/WINDOWS_LAB_WRAPPER_ARGUMENTS_PASSED/);
+  for(const conflict of [['-AllowMutation'],['-Resume'],['-NewRun'],['-DisposableStoreAck','disposable.myshopify.com'],['-ProductGid','gid://shopify/Product/123'],['-OriginalTitle','Exact title']]) {
+    const result=invoke(['-File','release/windows-lab.ps1','-ShopifyEnvPath','C:/offline-nonexistent.env','-PublicOrigin','https://gateway.example.com','-Shop','disposable.myshopify.com','-PrepareOnly',...conflict]);
+    assert.equal(result.status,1);
+    assert.match(result.stderr,/PREPARE_ONLY_CONFLICTS_WITH_MUTATION_OR_RECOVERY/);
+  }
 });
 
 test('authenticated smoke transport always uses literal loopback and refuses redirects',async()=>{

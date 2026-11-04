@@ -9,9 +9,16 @@ param(
     [string]$OriginalTitle,
     [switch]$Resume,
     [switch]$NewRun,
+    [switch]$PrepareOnly,
     [string]$GitBashPath = "$env:ProgramFiles\Git\bin\bash.exe"
 )
 $ErrorActionPreference = 'Stop'
+if ($PrepareOnly -and ($AllowMutation -or $Resume -or $NewRun -or
+    $PSBoundParameters.ContainsKey('DisposableStoreAck') -or
+    $PSBoundParameters.ContainsKey('ProductGid') -or $PSBoundParameters.ContainsKey('OriginalTitle'))) {
+    [Console]::Error.WriteLine('PREPARE_ONLY_CONFLICTS_WITH_MUTATION_OR_RECOVERY')
+    exit 1
+}
 $arguments = @(
     '--settings', $ShopifyEnvPath, '--origin', $PublicOrigin, '--shop', $Shop,
     '--bash', $GitBashPath
@@ -21,6 +28,7 @@ if ($AllowMutation) {
 }
 if ($Resume) { $arguments += '--resume' }
 if ($NewRun) { $arguments += '--new-run' }
+if ($PrepareOnly) { $arguments += '--prepare-only' }
 # Windows PowerShell 5.1 native argument quoting can remove literal title quotes.
 # JSON in the child environment preserves every character without shell parsing.
 $previousArguments = $env:CG_LAB_OPTIONS_JSON
