@@ -62,8 +62,12 @@ export class PostgresStore implements OAuthStateStore, OAuthTokenStore {
   get(tenantId: string, shop: string): Promise<OfflineTokens | undefined>;
   async get(id: string, shop?: string): Promise<OAuthState | OfflineTokens | undefined> {
     if (shop === undefined) return this.state((await this.db.query('SELECT * FROM oauth_states WHERE state_hash=$1', [id])).rows[0]);
-    const result = await this.db.query('SELECT token_ciphertext FROM connections WHERE tenant_id=$1 AND shop=$2 AND revoked_at IS NULL', [id,shop]);
-    return result.rows[0] ? JSON.parse(decryptSecret(result.rows[0].token_ciphertext, this.masterKey, `token:${id}:${shop}`)) as OfflineTokens : undefined;
+    return (await this.getTokenSnapshot(id,shop))?.tokens;
+  }
+  async getTokenSnapshot(tenantId: string, shop: string): Promise<{tokens:OfflineTokens;ciphertext:string} | undefined> {
+    const result = await this.db.query('SELECT token_ciphertext FROM connections WHERE tenant_id=$1 AND shop=$2 AND revoked_at IS NULL', [tenantId,shop]);
+    const ciphertext=result.rows[0]?.token_ciphertext;
+    return ciphertext ? {tokens:JSON.parse(decryptSecret(ciphertext,this.masterKey,`token:${tenantId}:${shop}`)) as OfflineTokens,ciphertext} : undefined;
   }
   async consume(stateHash: string, binding: string, shop: string, now: number): Promise<OAuthState | undefined> {
     return this.state((await this.db.query(`DELETE FROM oauth_states WHERE state_hash=$1 AND browser_binding_hash=$2 AND shop=$3 AND expires_at>$4 RETURNING *`, [stateHash,binding,shop,new Date(now)])).rows[0]);
@@ -76,10 +80,14 @@ export class PostgresStore implements OAuthStateStore, OAuthTokenStore {
       await this.db.query(`INSERT INTO shopify_shop_owners (client_id,shop,tenant_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [app.clientId,shop,tenantId]);
       const owner = (await this.db.query('SELECT tenant_id FROM shopify_shop_owners WHERE client_id=$1 AND shop=$2', [app.clientId,shop])).rows[0];
       if (owner?.tenant_id !== tenantId) throw new Error('Shopify shop authorization belongs to another tenant');
-      await this.db.query(`INSERT INTO connections (id,tenant_id,shop,token_ciphertext,scopes) VALUES ($1,$2,$3,$4,$5)
+      await this.db.query(`INSERT INTO connections (id,tenant_id,shop,token_ciphertext,scopes,shopify_shop_id,authorization_generation) VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7::uuid,gen_random_uuid()))
         ON CONFLICT (tenant_id,shop) DO UPDATE SET token_ciphertext=EXCLUDED.token_ciphertext,
-        scopes=EXCLUDED.scopes, revoked_at=NULL, updated_at=now()`,
-      [randomUUID(),tenantId,shop,encryptSecret(JSON.stringify(tokens),this.masterKey,`token:${tenantId}:${shop}`),tokens.scopes]);
+        scopes=EXCLUDED.scopes, revoked_at=NULL, shopify_shop_id=COALESCE(EXCLUDED.shopify_shop_id,connections.shopify_shop_id),
+        authorization_generation=COALESCE($7::uuid,connections.authorization_generation),
+        lifecycle_hold=CASE WHEN $7::uuid IS NOT NULL AND connections.authorization_generation<>$7::uuid THEN false ELSE connections.lifecycle_hold END, updated_at=now()`,
+      [randomUUID(),tenantId,shop,encryptSecret(JSON.stringify(tokens),this.masterKey,`token:${tenantId}:${shop}`),tokens.scopes,tokens.shopId ?? null,tokens.authorizationId ?? null]);
+      if (tokens.authorizationId) await this.db.query(`UPDATE shopify_lifecycle_events SET status='ignored',updated_at=clock_timestamp()
+        WHERE tenant_id=$1 AND shop=$2 AND generation<>$3 AND status IN ('pending','action_required')`,[tenantId,shop,tokens.authorizationId]);
       await this.db.query('COMMIT');
     } catch (error) { await this.db.query('ROLLBACK'); throw error; }
   }

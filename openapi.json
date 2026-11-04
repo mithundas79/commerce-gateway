@@ -1193,6 +1193,182 @@
           }
         }
       }
+    },
+    "/webhooks/shopify/{clientId}/{topic}/{binding}": {
+      "post": {
+        "operationId": "receiveShopifyLifecycle",
+        "summary": "Accept a Shopify lifecycle delivery",
+        "description": "Public provider callback. Verify the HMAC of raw JSON bytes before parsing. A topic-specific secret path capability binds the topic because Shopify body signatures exclude headers. Signed payload shop identity and the persisted app/shop owner determine the tenant. Persist a body receipt and protective hold before acknowledging. Background workers reconcile installation state and erase data. Accepted means durable receipt, and processing may require operator action. Body limit is 1048576 bytes. See release/shopify-lifecycle.md for generated TOML, retries, holds and privacy data handling.",
+        "security": [
+          {
+            "shopifyWebhookHmac": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "clientId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "topic",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "app-uninstalled",
+                "customers-data-request",
+                "customers-redact",
+                "shop-redact"
+              ]
+            }
+          },
+          {
+            "name": "binding",
+            "in": "path",
+            "required": true,
+            "description": "Secret 43-character topic capability derived from the app secret and client ID with domain separation. Generate exact URIs with the shopify-webhooks admin command.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{43}$"
+            }
+          },
+          {
+            "name": "X-Shopify-Topic",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the topic identified by the protected URL.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "app/uninstalled",
+                "customers/data_request",
+                "customers/redact",
+                "shop/redact"
+              ]
+            }
+          },
+          {
+            "name": "X-Shopify-Shop-Domain",
+            "in": "header",
+            "required": true,
+            "description": "Must match the signed payload domain or the domain resolved from authenticated persisted shop ID.",
+            "schema": {
+              "$ref": "#/components/schemas/Shop"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "Send original bytes. Changing whitespace or JSON serialization after computing the signature invalidates authentication. Uninstall requires id plus myshopify_domain, which may be null if the authenticated shop ID was persisted at authorization. Compliance topics require shop_id and shop_domain. Customer topics require customer identity plus orders_requested/data_request.id or orders_to_redact. Customer data is discarded after validation.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "example": {
+                "shop_id": 123,
+                "shop_domain": "demo.myshopify.com"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Receipt durably accepted, or an authenticated duplicate/unknown shop needs no action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "accepted"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "accepted": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  }
+                },
+                "example": {
+                  "accepted": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid payload, identity or topic/header mismatch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "INVALID_WEBHOOK_PAYLOAD"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The body HMAC, owning app signature or secret topic URL is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "INVALID_WEBHOOK_SIGNATURE"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body exceeds 1 MiB.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "REQUEST_TOO_LARGE"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type must be application/json.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "INVALID_REQUEST"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Durable acceptance could not complete. Retry delivery.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "WEBHOOK_PROCESSING_FAILED"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "webhooks": {
@@ -1292,6 +1468,12 @@
         "in": "header",
         "name": "x-commerce-signature",
         "description": "Outgoing tenant-specific HMAC; bind event ID, timestamp and exact raw body as described by the webhook operation."
+      },
+      "shopifyWebhookHmac": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Shopify-Hmac-Sha256",
+        "description": "Base64 HMAC-SHA256 of the exact original body bytes using the owning Shopify app secret."
       }
     },
     "headers": {
@@ -1823,7 +2005,9 @@
         "type": "object",
         "properties": {
           "shop": {
-            "$ref": "#/components/schemas/Shop"
+            "type": "string",
+            "maxLength": 253,
+            "description": "Canonical lower-case myshopify.com domain. Invalid domains return INVALID_SHOP."
           },
           "returnUrl": {
             "type": "string",

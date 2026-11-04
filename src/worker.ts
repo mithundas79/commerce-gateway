@@ -94,6 +94,7 @@ export async function claimOperation(pool: Pick<Pool, 'query'>, leaseMs = 90_000
       JOIN connections c ON c.id = o.connection_id AND c.tenant_id = o.tenant_id
       WHERE ((o.status IN ('queued', 'retry', 'recovering') AND o.next_attempt_at <= clock_timestamp())
          OR (o.status = 'running' AND o.lease_until <= clock_timestamp()))
+        AND NOT c.lifecycle_hold
         AND (c.worker_not_before <= clock_timestamp() OR o.deadline_at <= clock_timestamp())
         AND (o.deadline_at <= clock_timestamp() OR NOT EXISTS (
           SELECT 1 FROM operations prior WHERE prior.tenant_id = o.tenant_id
@@ -174,7 +175,7 @@ export async function runWorkerOnce(options: WorkerOptions): Promise<boolean> {
   try {
     const connection = await pool.query(`
       SELECT id FROM connections WHERE id = $1 AND tenant_id = $2
-        AND revoked_at IS NULL AND 'write_products' = ANY(scopes)
+        AND revoked_at IS NULL AND NOT lifecycle_hold AND 'write_products' = ANY(scopes)
     `, [operation.connection_id, operation.tenant_id]);
     const allowed = connection.rows.length > 0 && (!options.authorize
       || await bounded(signal => options.authorize!(operation, signal), Math.min(timeoutMs, deadline - now())));
@@ -200,7 +201,7 @@ export async function runWorkerOnce(options: WorkerOptions): Promise<boolean> {
       WHERE id = $1 AND tenant_id = $2 AND fence_token = $3 AND status = 'running'
         AND lease_until > clock_timestamp() AND deadline_at > clock_timestamp()
         AND EXISTS (SELECT 1 FROM connections c WHERE c.id = operations.connection_id
-          AND c.tenant_id = operations.tenant_id AND c.revoked_at IS NULL
+          AND c.tenant_id = operations.tenant_id AND c.revoked_at IS NULL AND NOT c.lifecycle_hold
           AND 'write_products' = ANY(c.scopes) AND c.worker_not_before <= clock_timestamp())
         AND NOT EXISTS (
           SELECT 1 FROM operations prior WHERE prior.tenant_id = operations.tenant_id

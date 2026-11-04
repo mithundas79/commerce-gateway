@@ -10,6 +10,7 @@ import { ConnectorError, ShopifyConnector, validateShop } from './shopify.js';
 import { cleanupExpiredOAuth, PostgresStore } from './store.js';
 import { startWorker, type ProductContext } from './worker.js';
 import { startNotifications } from './notifications.js';
+import { registerShopifyWebhooks, ShopifyLifecycle, shopifyWebhookRoute } from './lifecycle.js';
 
 const cookieName = '__Host-shopify_oauth';
 const cookieAttributes = 'Path=/; Secure; HttpOnly; SameSite=Lax';
@@ -24,11 +25,20 @@ export function readBinding(cookie: string | undefined): string {
 export function createRuntime(pool: Pool, masterKey: string, baseUrl: string, logger = false) {
   const base = publicBaseUrl(baseUrl);
   const store = new PostgresStore(pool, masterKey);
-  const oauth = new ShopifyOAuth({ getApp: tenant => store.getApp(tenant), states: store, tokens: store });
   const connector = new ShopifyConnector();
-  const app = buildApi({ pool, logger, publicRoutes: ['/oauth/shopify/start','/oauth/shopify/callback'],
+  const oauth = new ShopifyOAuth({ getApp: tenant => store.getApp(tenant), states: store, tokens: {
+    get: (tenant,shop) => store.get(tenant,shop), delete: (tenant,shop) => store.delete(tenant,shop),
+    withLock: (key,work) => store.withLock(key,work),
+    save: async (tenant,shop,tokens) => {
+      const shopId = tokens.shopId ?? (await connector.readShopIdentity({shop,accessToken:tokens.accessToken})).id;
+      await store.save(tenant,shop,{...tokens,shopId});
+    },
+  } });
+  const lifecycle = new ShopifyLifecycle(pool,store,oauth,connector);
+  const app = buildApi({ pool, logger, publicRoutes: ['/oauth/shopify/start','/oauth/shopify/callback',shopifyWebhookRoute],
     readProducts: async (connection: Connection, options) => connector.listProducts({ shop: connection.shop, accessToken: await oauth.accessToken(connection.tenant_id,connection.shop), ...options }),
   });
+  registerShopifyWebhooks(app,pool,store,lifecycle);
 
   app.post<{ Body: { shop: string; returnUrl?: string } }>('/v1/shopify/connect', {
     schema: { body: { type: 'object', additionalProperties: false, required: ['shop'], properties: { shop: { type:'string', maxLength:253 }, returnUrl: { type:'string', maxLength:2048 } } } },
@@ -70,7 +80,7 @@ export function createRuntime(pool: Pool, masterKey: string, baseUrl: string, lo
 
   async function credentials(context: ProductContext) {
     context.signal.throwIfAborted();
-    const row = (await pool.query('SELECT shop FROM connections WHERE tenant_id=$1 AND id=$2 AND revoked_at IS NULL AND \'write_products\'=ANY(scopes)', [context.tenantId,context.connectionId])).rows[0];
+    const row = (await pool.query('SELECT shop FROM connections WHERE tenant_id=$1 AND id=$2 AND revoked_at IS NULL AND NOT lifecycle_hold AND \'write_products\'=ANY(scopes)', [context.tenantId,context.connectionId])).rows[0];
     if (!row) throw new ConnectorError('PERMISSION','Connection is not authorized',403);
     const accessToken = await oauth.accessToken(context.tenantId,row.shop);
     context.signal.throwIfAborted();
@@ -80,7 +90,7 @@ export function createRuntime(pool: Pool, masterKey: string, baseUrl: string, lo
     readProductTitle: async (context:ProductContext) => (await connector.readProductTitle(await credentials(context)))?.title ?? null,
     updateProductTitle: async (context:ProductContext & { title:string }) => connector.updateProductTitle({ ...await credentials(context), title:context.title }),
   };
-  return { app, store, oauth, provider };
+  return { app, store, oauth, provider, lifecycle };
 }
 
 export async function main(env = process.env): Promise<void> {
@@ -92,7 +102,7 @@ export async function main(env = process.env): Promise<void> {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be between 1 and 65535');
   const pool = new Pool({ connectionString:required(env,'DATABASE_URL'), max:10, connectionTimeoutMillis:10_000, idleTimeoutMillis:30_000, statement_timeout:30_000 });
   pool.on('error', () => { console.error('Database pool connection failed'); });
-  const { app,provider } = createRuntime(pool,master,base,env.NODE_ENV !== 'test');
+  const { app,provider,lifecycle } = createRuntime(pool,master,base,env.NODE_ENV !== 'test');
   const stop = new AbortController();
   const shutdown = () => { stop.abort(); };
   process.once('SIGTERM',shutdown); process.once('SIGINT',shutdown);
@@ -106,13 +116,15 @@ export async function main(env = process.env): Promise<void> {
       await rm(heartbeat,{ force:true });
       let workerHealthy = false;
       let notificationsHealthy = false;
+      let lifecycleHealthy = false;
       let lastWorkerSuccess = 0;
       let lastNotificationSuccess = 0;
+      let lastLifecycleSuccess = 0;
       let nextCleanupAt = 0;
       let heartbeatUpdate = Promise.resolve();
       const publishHeartbeat = () => {
-        heartbeatUpdate = heartbeatUpdate.catch(() => {}).then(() => workerHealthy && notificationsHealthy
-          && Date.now()-lastWorkerSuccess < 120_000 && Date.now()-lastNotificationSuccess < 120_000
+        heartbeatUpdate = heartbeatUpdate.catch(() => {}).then(() => workerHealthy && notificationsHealthy && lifecycleHealthy
+          && Date.now()-lastWorkerSuccess < 120_000 && Date.now()-lastNotificationSuccess < 120_000 && Date.now()-lastLifecycleSuccess < 120_000
           ? writeFile(heartbeat,String(Date.now()),{ mode:0o600 })
           : rm(heartbeat,{ force:true }));
         return heartbeatUpdate;
@@ -128,6 +140,9 @@ export async function main(env = process.env): Promise<void> {
           startNotifications({ pool,signal:stop.signal,decryptSecret:(ciphertext,tenant) => decryptSecret(ciphertext,master,`notification:${tenant}`),
             onHealthy:() => {notificationsHealthy=true; lastNotificationSuccess=Date.now(); return publishHeartbeat();},
             onUnhealthy:() => {notificationsHealthy=false; return publishHeartbeat();} }),
+          lifecycle.start(stop.signal,
+            () => {lifecycleHealthy=true;lastLifecycleSuccess=Date.now();return publishHeartbeat();},
+            () => {lifecycleHealthy=false;return publishHeartbeat();}),
         ]);
       } finally { stop.abort(); await heartbeatUpdate.catch(() => {}); await rm(heartbeat,{ force:true }); }
     }

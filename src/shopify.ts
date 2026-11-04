@@ -105,6 +105,13 @@ export class ShopifyConnector {
     } catch { throw new ConnectorError('TRANSIENT', 'Malformed Shopify product list', 502, true); }
   }
 
+  async readShopIdentity(input: ShopifyCredentials): Promise<{ id: string; shop: string }> {
+    const data = await this.graphql(input, 'query GatewayShopIdentity { shop { id myshopifyDomain } }', {}, false);
+    const id = /^gid:\/\/shopify\/Shop\/([1-9]\d*)$/.exec(data.shop?.id ?? '')?.[1];
+    if (!id || data.shop?.myshopifyDomain !== input.shop) throw new ConnectorError('TRANSIENT', 'Invalid Shopify shop identity', 503, true);
+    return { id, shop: input.shop };
+  }
+
   async readProductTitle(input: ProductIdentity): Promise<ShopifyProduct | null> {
     validProductId(input.productId);
     const data = await this.graphql(input, `query ProductTitle($id: ID!) { product(id: $id) { id title updatedAt } }`, { id: input.productId }, false);
@@ -118,7 +125,7 @@ export class ShopifyConnector {
 
   async updateProductTitle(input: ProductIdentity & { title: string }): Promise<ShopifyProduct> {
     validProductId(input.productId);
-    if (typeof input.title !== 'string' || input.title.trim().length === 0 || input.title.length > 255) throw new ConnectorError('VALIDATION', 'Title must contain 1–255 characters', 400);
+    if (typeof input.title !== 'string' || input.title.trim().length === 0 || input.title.length > 255) throw new ConnectorError('VALIDATION', 'Title must contain 1-255 characters', 400);
     const data = await this.graphql(input, `mutation ProductTitleUpdate($product: ProductUpdateInput!) { productUpdate(product: $product) { product { id title updatedAt } userErrors { field message } } }`, { product: { id: input.productId, title: input.title } }, true);
     const result = data.productUpdate;
     if (Array.isArray(result?.userErrors) && result.userErrors.length > 0 && !result.product) throw new ConnectorError('UPSTREAM_REJECTED', 'Shopify rejected the title update', 422);

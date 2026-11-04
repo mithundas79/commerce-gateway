@@ -53,13 +53,13 @@ function check(schema,value,path='$') {
 
 test('OpenAPI 3.1 route map matches every implemented Fastify customer route',async() => {
   assert.equal(document.openapi,'3.1.0');assert.equal(document.jsonSchemaDialect,'https://json-schema.org/draft/2020-12/schema');
-  const sources=await Promise.all(['api.ts','main.ts'].map(name => readFile(new URL('../src/'+name,import.meta.url),'utf8')));
+  const sources=await Promise.all(['api.ts','main.ts','lifecycle.ts'].map(name => readFile(new URL('../src/'+name,import.meta.url),'utf8')));
   const implemented=[];
-  for(const source of sources) for(const match of source.matchAll(/app\.(get|post)(?:<[\s\S]*?>)?\(\s*(['"])(\/[^'"]+)\2/g)) {
+  for(const source of sources) for(const match of source.matchAll(/(?:app|scope)\.(get|post)(?:<[\s\S]*?>)?\(\s*(['"])(\/[^'"]+)\2/g)) {
     implemented.push(match[1].toUpperCase()+' '+match[3].replace(/:([A-Za-z]+)/g,'{$1}'));
   }
   const documented=Object.entries(document.paths).flatMap(([path,operations]) => Object.keys(operations).map(method => method.toUpperCase()+' '+path));
-  assert.equal(implemented.length,10);assert.deepEqual(documented.sort(),implemented.sort());
+  assert.equal(implemented.length,11);assert.deepEqual(documented.sort(),implemented.sort());
   assert.equal(document.servers[0].url,'https://{gatewayHost}');
 });
 
@@ -206,3 +206,4 @@ test('runtime API responses match the published health, tenant, mutation and pro
   await request('POST', writePath, writeUrl, 400, { ...writeOptions, payload: { ...payload, title: '   ' } });
   await request('POST', writePath, writeUrl, 413, { ...writeOptions, payload: { ...payload, title: 'x'.repeat(17000) } });
 });
+
