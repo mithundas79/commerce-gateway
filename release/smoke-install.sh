@@ -75,6 +75,10 @@ curl --fail --silent --show-error -H "Authorization: Bearer $api_key" https://lo
 [[ $(curl --silent --output /dev/null --write-out '%{http_code}' https://localhost:3443/v1/connections) == 401 ]]
 unset api_key
 
+if [[ -n ${GATEWAY_FOOTPRINT_REPORT:-} ]]; then
+  node "$test_scripts/measure-footprint.mjs" "$archive" "$GATEWAY_FOOTPRINT_REPORT"
+fi
+
 # Exercise encryption in the real application, then prove the matching key survives restore.
 "${compose[@]}" run --rm --no-deps -T -e "TENANT_ID=$tenant_id" -e SHOPIFY_CLIENT_ID=ci-client \
   -e SHOPIFY_CLIENT_SECRET=ci-encrypted-restore-probe -e SHOPIFY_SCOPES=write_products api node dist/admin.js configure-shopify
