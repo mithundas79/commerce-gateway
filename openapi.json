@@ -1,0 +1,1936 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "Commerce Gateway API",
+    "version": "0.1.0-alpha.1",
+    "description": "Headless tenant-isolated JSON API. The bearer key determines the tenant; clients never select a tenant in a request. Unknown and other-tenant connection/operation IDs both return 404 after authentication. Mutations are durable asynchronous operations; 202 confirms enqueue, not Shopify completion. Responses use Cache-Control: no-store. Deployment administration and provider token endpoints are outside this public contract."
+  },
+  "servers": [
+    {
+      "url": "https://{gatewayHost}",
+      "variables": {
+        "gatewayHost": {
+          "default": "gateway.example.com"
+        }
+      }
+    }
+  ],
+  "security": [
+    {
+      "gatewayBearer": []
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Check API process liveness",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The HTTP process is alive.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "ok"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "status": "ok"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "getReadiness",
+        "summary": "Check API database readiness",
+        "security": [],
+        "description": "Checks a PostgreSQL query. This endpoint does not establish Shopify availability or worker health.",
+        "responses": {
+          "200": {
+            "description": "PostgreSQL is reachable.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "ready"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "status": "ready"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "PostgreSQL is unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "unavailable"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "status": "unavailable"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connections": {
+      "get": {
+        "operationId": "listConnections",
+        "summary": "List active connections owned by the authenticated tenant",
+        "description": "UUID keyset pagination in descending ID order. Continue with pageInfo.endCursor while hasNextPage is true; no cross-request snapshot is promised. Unknown query parameters are rejected.",
+        "parameters": [
+          {
+            "name": "first",
+            "in": "query",
+            "description": "Decimal page size. Unknown query parameters and duplicate values are rejected.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            },
+            "example": 25
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Previous pageInfo.endCursor (connection UUID).",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A bounded page of active tenant connections; credentials are never returned.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionPage"
+                },
+                "example": {
+                  "connections": [
+                    {
+                      "id": "20000000-0000-4000-8000-000000000001",
+                      "shop": "disposable.myshopify.com",
+                      "scopes": [
+                        "read_products",
+                        "write_products"
+                      ],
+                      "createdAt": "2026-11-04T12:00:00.000Z",
+                      "updatedAt": "2026-11-04T12:00:00.000Z"
+                    }
+                  ],
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "20000000-0000-4000-8000-000000000001"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/connections/{connectionId}/products": {
+      "get": {
+        "operationId": "listProducts",
+        "summary": "Read a connection product page",
+        "parameters": [
+          {
+            "name": "connectionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "first",
+            "in": "query",
+            "description": "Decimal page size. Unknown query parameters and duplicate values are rejected.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 25
+            },
+            "example": 25
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Opaque product cursor returned as pageInfo.endCursor.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A product page.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductPage"
+                },
+                "example": {
+                  "products": [
+                    {
+                      "id": "gid://shopify/Product/123",
+                      "title": "Disposable product",
+                      "updatedAt": "2026-11-04T12:00:00.000Z"
+                    }
+                  ],
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Merchant approval is missing a required permission; repeat the connection approval flow.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderError"
+                },
+                "example": {
+                  "error": "CONNECTION_PERMISSION_REQUIRED",
+                  "retryable": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No active connection exists in this tenant.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "CONNECTION_NOT_FOUND"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Merchant authorization must be renewed; this is distinct from an invalid gateway bearer key.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderError"
+                },
+                "example": {
+                  "error": "CONNECTION_REAUTHORIZATION_REQUIRED",
+                  "retryable": false
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Provider throttling. A bounded delay is returned for this safe read.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderRetryError"
+                },
+                "example": {
+                  "error": "PROVIDER_RATE_LIMITED",
+                  "retryable": true,
+                  "retryAfterMs": 2500
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "502": {
+            "description": "Provider rejection/version mismatch is nonretryable; an unknown read failure may be retried.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderError"
+                },
+                "example": {
+                  "error": "PROVIDER_API_VERSION_MISMATCH",
+                  "retryable": false
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Transient provider read failure; retry after the supplied delay.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderRetryError"
+                },
+                "example": {
+                  "error": "PROVIDER_UNAVAILABLE",
+                  "retryable": true,
+                  "retryAfterMs": 1000
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connections/{connectionId}/product-title-updates": {
+      "post": {
+        "operationId": "enqueueProductTitleUpdate",
+        "summary": "Durably enqueue one product title update",
+        "description": "Idempotency scope is authenticated tenant + connection + product_title_update operation kind + Idempotency-Key. Reusing a key with identical productId/title returns the same operation (202, replayed=true); changing either value returns 409. Keep the same key if a submission response is lost. A new key creates a distinct operation. Per-product FIFO preserves mutation order, and unresolved uncertain operations hold followers until administrator reconciliation/release. Poll the Location URL; do not blindly resubmit ambiguous writes.",
+        "parameters": [
+          {
+            "name": "connectionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "example": "title-123-revision-1"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TitleUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Durable enqueue or identical replay, including an already terminal operation. Shopify completion is not implied.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "description": "Relative authenticated operation status URL.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^/v1/operations/[a-fA-F0-9-]{36}$"
+                },
+                "example": "/v1/operations/30000000-0000-4000-8000-000000000001"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnqueueResponse"
+                },
+                "example": {
+                  "operation": {
+                    "id": "30000000-0000-4000-8000-000000000001",
+                    "connectionId": "20000000-0000-4000-8000-000000000001",
+                    "kind": "product_title_update",
+                    "status": "queued",
+                    "attemptCount": 0,
+                    "result": null,
+                    "error": null,
+                    "createdAt": "2026-11-04T12:00:00.000Z",
+                    "updatedAt": "2026-11-04T12:00:00.000Z",
+                    "completedAt": null,
+                    "orderingReleasedAt": null
+                  },
+                  "replayed": false
+                }
+              }
+            },
+            "links": {
+              "OperationStatus": {
+                "operationId": "getOperation",
+                "parameters": {
+                  "operationId": "$response.body#/operation/id"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "No active connection exists in this tenant.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "CONNECTION_NOT_FOUND"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The scoped key already exists with a different productId or title.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "IDEMPOTENCY_CONFLICT"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "JSON request exceeds 16 KiB.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "REQUEST_TOO_LARGE"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/operations/{operationId}": {
+      "get": {
+        "operationId": "getOperation",
+        "summary": "Poll a tenant-owned durable operation",
+        "description": "queued/running/retry/recovering are nonterminal. succeeded and failed are terminal. uncertain is terminal with unresolved provider outcome: reconcile before any replacement write. blockedBy identifies the earliest same-product ordering hold, including an unresolved uncertain predecessor. orderingReleasedAt records an administrator release of this operation's ordering hold; status remains uncertain. Operation status remains readable after a connection is revoked.",
+        "parameters": [
+          {
+            "name": "operationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current operation and optional product-order blocker.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationStatusResponse"
+                },
+                "example": {
+                  "operation": {
+                    "id": "30000000-0000-4000-8000-000000000001",
+                    "connectionId": "20000000-0000-4000-8000-000000000001",
+                    "kind": "product_title_update",
+                    "status": "queued",
+                    "attemptCount": 0,
+                    "result": null,
+                    "error": null,
+                    "createdAt": "2026-11-04T12:00:00.000Z",
+                    "updatedAt": "2026-11-04T12:00:00.000Z",
+                    "completedAt": null,
+                    "orderingReleasedAt": null,
+                    "blockedBy": {
+                      "operationId": "30000000-0000-4000-8000-000000000000",
+                      "status": "uncertain"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "Operation is unknown or belongs to another tenant.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "OPERATION_NOT_FOUND"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/shopify/connect": {
+      "post": {
+        "operationId": "createShopifyBrowserStart",
+        "summary": "Create a short-lived browser connection ticket",
+        "description": "Authenticated tenant operation. The server selects that tenant's configured Shopify app. Open browserStartUrl in a browser; never send the gateway bearer to Shopify. returnUrl must exactly match an administrator-configured allowlist. The ticket is a sensitive single-use capability and expires in 120 seconds.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One-use browser start URL (not an access token).",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserStartResponse"
+                },
+                "example": {
+                  "browserStartUrl": "https://gateway.example.com/oauth/shopify/start?ticket=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                  "expiresIn": 120
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, invalid canonical shop, or return URL absent from the administrator allowlist. Codes are INVALID_REQUEST, INVALID_SHOP, or INVALID_RETURN_URL.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "INVALID_REQUEST"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "413": {
+            "description": "JSON request exceeds 16 KiB.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "REQUEST_TOO_LARGE"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/oauth/shopify/start": {
+      "get": {
+        "operationId": "startShopifyBrowserAuthorization",
+        "summary": "Consume a browser start ticket and redirect to Shopify",
+        "description": "Browser boundary, not a JSON client flow. No gateway bearer is required. The one-use hashed ticket binds the tenant, shop and allowlisted return target selected by the authenticated connect request. Sets a secure browser-binding cookie, then redirects to Shopify for consent. This endpoint is not an unsolicited App Store installation entry point.",
+        "security": [
+          {
+            "browserStartTicket": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "ticket",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 43,
+              "maxLength": 43,
+              "pattern": "^[A-Za-z0-9_-]{43}$"
+            },
+            "x-sensitive": true
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Browser binding established; follow the Shopify authorization redirect.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Referrer-Policy": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-referrer"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "Set-Cookie": {
+                "description": "__Host-shopify_oauth; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Ticket is missing, malformed, expired or already consumed.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "INVALID_BROWSER_START"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/oauth/shopify/callback": {
+      "get": {
+        "operationId": "completeShopifyBrowserAuthorization",
+        "summary": "Verify a Shopify-signed browser callback",
+        "description": "Browser boundary. Requires the matching secure cookie, one-use 10-minute state, canonical shop, HMAC over all non-hmac query pairs sorted by key, and timestamp within ten minutes. Duplicate query keys are rejected. Tenant comes from stored state, never a query tenant ID. Successful callbacks clear the browser-binding cookie. Provider access/refresh tokens remain server-side.",
+        "security": [
+          {
+            "oauthBrowserBinding": [],
+            "shopifyCallbackHmac": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "shop",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Shop"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{43}$"
+            },
+            "x-sensitive": true
+          },
+          {
+            "name": "hmac",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-fA-F0-9]{64}$"
+            },
+            "x-sensitive": true
+          },
+          {
+            "name": "timestamp",
+            "in": "query",
+            "required": true,
+            "description": "Unix time in seconds, no more than ten minutes from server time.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "x-sensitive": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connection saved when no return URL was configured.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Referrer-Policy": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-referrer"
+                }
+              },
+              "Set-Cookie": {
+                "description": "Expires the secure browser-binding cookie.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "connected": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "shop": {
+                      "$ref": "#/components/schemas/Shop"
+                    }
+                  },
+                  "required": [
+                    "connected",
+                    "shop"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "connected": true,
+                  "shop": "disposable.myshopify.com"
+                }
+              }
+            }
+          },
+          "302": {
+            "description": "Redirect to the exact allowlisted return URL captured before consent.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "Set-Cookie": {
+                "description": "Expires the secure browser-binding cookie.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid shop or return URL.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "OAUTH_FAILED"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Shop authorization was rejected.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "OAUTH_FAILED"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid state, signature, cookie, timestamp or callback replay.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "OAUTH_FAILED"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Provider token endpoint throttled; restart the authenticated connection flow.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "OAUTH_FAILED"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Callback exchange failed; restart the authenticated connection flow.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "OAUTH_FAILED"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "operationId": "getAuthenticatedHealth",
+        "summary": "Check API and database health with a tenant bearer key",
+        "description": "Checks the API and a PostgreSQL query after bearer authentication. Database failures during authentication or the readiness query return 503. Worker heartbeat is measured separately by the deployment health check.",
+        "responses": {
+          "200": {
+            "description": "PostgreSQL is reachable.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "ready"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "status": "ready"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "description": "PostgreSQL is unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "unavailable"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "status": "unavailable"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {
+    "operationCompleted": {
+      "post": {
+        "operationId": "receiveOperationCompleted",
+        "summary": "Receive a signed tenant completion notification",
+        "description": "Outgoing request to the tenant endpoint configured by an administrator; this is not a gateway HTTP route. An enabled endpoint at first terminal transition creates one immutable event in the same PostgreSQL transaction. Delivery is at least once; deduplicate x-commerce-event-id and return 2xx for accepted duplicates. Verify the exact raw UTF-8 body with the tenant secret: sha256=hex(HMAC-SHA256(secret, timestamp + \".\" + eventId + \".\" + rawBody)), using constant-time comparison, and enforce a timestamp freshness window. Timestamp/signature may change on retry; event ID/body do not. Destination is public HTTPS port 443, DNS-validated and connection-pinned; redirects are not followed. Default limit: eight attempts and 24 hours; final failures remain in the database. Configuration changes invalidate older queued destination versions; there is no historical backfill.",
+        "security": [
+          {
+            "notificationHmac": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "x-commerce-event-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "x-commerce-timestamp",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$"
+            }
+          },
+          {
+            "name": "x-commerce-signature",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^sha256=[a-f0-9]{64}$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompletionEvent"
+              }
+            }
+          }
+        },
+        "responses": {
+          "2XX": {
+            "description": "Accepted; a duplicate immutable event must also be acknowledged with 2xx."
+          },
+          "3XX": {
+            "description": "Redirect rejected, final failure."
+          },
+          "4XX": {
+            "description": "Final failure except 408/425/429, which are retried within the delivery budget."
+          },
+          "5XX": {
+            "description": "Retried with bounded exponential backoff."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "gatewayBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque API key",
+        "description": "Tenant-scoped gateway API key. Send only to this gateway; never place it in a URL."
+      },
+      "browserStartTicket": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "ticket",
+        "description": "One-use 120-second browser capability created by the authenticated connect operation."
+      },
+      "oauthBrowserBinding": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-shopify_oauth",
+        "description": "Secure HttpOnly SameSite=Lax cookie generated by the browser start route."
+      },
+      "shopifyCallbackHmac": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "hmac",
+        "description": "Shopify callback HMAC verified with the stored tenant app secret; state/cookie/timestamp checks also apply."
+      },
+      "notificationHmac": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-commerce-signature",
+        "description": "Outgoing tenant-specific HMAC; bind event ID, timestamp and exact raw body as described by the webhook operation."
+      }
+    },
+    "headers": {
+      "RetryAfter": {
+        "description": "Whole seconds to wait before repeating a safe product read. Derived from retryAfterMs rounded up; bounded to 1..300 seconds.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        },
+        "example": 3
+      }
+    },
+    "responses": {
+      "InvalidRequest": {
+        "description": "Malformed or out-of-bounds JSON, path or query values. Unknown body/query properties are rejected on JSON API endpoints.",
+        "headers": {
+          "Cache-Control": {
+            "description": "Responses must not be cached.",
+            "schema": {
+              "type": "string",
+              "const": "no-store"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/GatewayError"
+            },
+            "example": {
+              "error": "INVALID_REQUEST"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing, invalid or revoked gateway bearer key.",
+        "headers": {
+          "Cache-Control": {
+            "description": "Responses must not be cached.",
+            "schema": {
+              "type": "string",
+              "const": "no-store"
+            }
+          },
+          "WWW-Authenticate": {
+            "schema": {
+              "type": "string",
+              "const": "Bearer"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/GatewayError"
+            },
+            "example": {
+              "error": "UNAUTHORIZED"
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "Sanitized internal/database failure. No upstream payload or credential is returned.",
+        "headers": {
+          "Cache-Control": {
+            "description": "Responses must not be cached.",
+            "schema": {
+              "type": "string",
+              "const": "no-store"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/GatewayError"
+            },
+            "example": {
+              "error": "INTERNAL_ERROR"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Uuid": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "Shop": {
+        "type": "string",
+        "maxLength": 253,
+        "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.myshopify\\.com$"
+      },
+      "ProductId": {
+        "type": "string",
+        "maxLength": 64,
+        "pattern": "^gid://shopify/Product/[1-9][0-9]{0,19}$",
+        "example": "gid://shopify/Product/123"
+      },
+      "Title": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 255,
+        "pattern": "\\S",
+        "description": "Exact non-whitespace-only title; also limited to 255 UTF-16 code units. Whitespace is preserved.",
+        "x-maxUtf16CodeUnits": 255
+      },
+      "GatewayError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "pattern": "^[A-Z0-9_]+$"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "ProviderError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "enum": [
+              "CONNECTION_REAUTHORIZATION_REQUIRED",
+              "CONNECTION_PERMISSION_REQUIRED",
+              "PROVIDER_RATE_LIMITED",
+              "PROVIDER_UNAVAILABLE",
+              "PROVIDER_API_VERSION_MISMATCH",
+              "PROVIDER_REJECTED"
+            ]
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "error",
+          "retryable"
+        ],
+        "additionalProperties": false
+      },
+      "ProviderRetryError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "enum": [
+              "PROVIDER_RATE_LIMITED",
+              "PROVIDER_UNAVAILABLE"
+            ]
+          },
+          "retryable": {
+            "type": "boolean",
+            "const": true
+          },
+          "retryAfterMs": {
+            "type": "number",
+            "minimum": 1000,
+            "maximum": 300000
+          }
+        },
+        "required": [
+          "error",
+          "retryable",
+          "retryAfterMs"
+        ],
+        "additionalProperties": false
+      },
+      "PageInfo": {
+        "type": "object",
+        "properties": {
+          "hasNextPage": {
+            "type": "boolean"
+          },
+          "endCursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "hasNextPage",
+          "endCursor"
+        ],
+        "additionalProperties": false
+      },
+      "Connection": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "shop": {
+            "$ref": "#/components/schemas/Shop"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "shop",
+          "scopes",
+          "createdAt",
+          "updatedAt"
+        ],
+        "additionalProperties": false
+      },
+      "ConnectionPage": {
+        "type": "object",
+        "properties": {
+          "connections": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/Connection"
+            }
+          },
+          "pageInfo": {
+            "type": "object",
+            "properties": {
+              "hasNextPage": {
+                "type": "boolean"
+              },
+              "endCursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Uuid"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "hasNextPage",
+              "endCursor"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "connections",
+          "pageInfo"
+        ],
+        "additionalProperties": false
+      },
+      "Product": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ProductId"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "updatedAt"
+        ],
+        "additionalProperties": false
+      },
+      "ProductPage": {
+        "type": "object",
+        "properties": {
+          "products": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/Product"
+            }
+          },
+          "pageInfo": {
+            "$ref": "#/components/schemas/PageInfo"
+          }
+        },
+        "required": [
+          "products",
+          "pageInfo"
+        ],
+        "additionalProperties": false
+      },
+      "TitleUpdate": {
+        "type": "object",
+        "properties": {
+          "productId": {
+            "$ref": "#/components/schemas/ProductId"
+          },
+          "title": {
+            "$ref": "#/components/schemas/Title"
+          }
+        },
+        "required": [
+          "productId",
+          "title"
+        ],
+        "additionalProperties": false
+      },
+      "OperationStatus": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "retry",
+          "recovering",
+          "succeeded",
+          "failed",
+          "uncertain"
+        ]
+      },
+      "OperationError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_]{1,80}$"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "additionalProperties": false
+      },
+      "OperationResult": {
+        "type": "object",
+        "properties": {
+          "productId": {
+            "$ref": "#/components/schemas/ProductId"
+          },
+          "title": {
+            "type": "string"
+          },
+          "recovered": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "productId",
+          "title"
+        ],
+        "additionalProperties": false
+      },
+      "BlockedBy": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "retry",
+              "recovering",
+              "uncertain"
+            ]
+          }
+        },
+        "required": [
+          "operationId",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "Operation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "connectionId": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "kind": {
+            "type": "string",
+            "const": "product_title_update"
+          },
+          "status": {
+            "$ref": "#/components/schemas/OperationStatus"
+          },
+          "attemptCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OperationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OperationError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "orderingReleasedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "blockedBy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BlockedBy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "connectionId",
+          "kind",
+          "status",
+          "attemptCount",
+          "result",
+          "error",
+          "createdAt",
+          "updatedAt",
+          "completedAt",
+          "orderingReleasedAt"
+        ],
+        "additionalProperties": false
+      },
+      "EnqueueResponse": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "$ref": "#/components/schemas/Operation"
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "operation",
+          "replayed"
+        ],
+        "additionalProperties": false
+      },
+      "OperationStatusResponse": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Operation"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "blockedBy"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "additionalProperties": false
+      },
+      "ConnectRequest": {
+        "type": "object",
+        "properties": {
+          "shop": {
+            "$ref": "#/components/schemas/Shop"
+          },
+          "returnUrl": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 2048,
+            "description": "Exact administrator-allowlisted HTTPS return target. Local development may allow an HTTP localhost target."
+          }
+        },
+        "required": [
+          "shop"
+        ],
+        "additionalProperties": false
+      },
+      "BrowserStartResponse": {
+        "type": "object",
+        "properties": {
+          "browserStartUrl": {
+            "type": "string",
+            "format": "uri",
+            "description": "Sensitive one-use URL; do not log or share it."
+          },
+          "expiresIn": {
+            "type": "integer",
+            "const": 120
+          }
+        },
+        "required": [
+          "browserStartUrl",
+          "expiresIn"
+        ],
+        "additionalProperties": false
+      },
+      "CompletionEvent": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "type": {
+            "type": "string",
+            "const": "operation.completed"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              "connectionId": {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              "kind": {
+                "type": "string",
+                "const": "product_title_update"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "succeeded",
+                  "failed",
+                  "uncertain"
+                ]
+              },
+              "result": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OperationResult"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "error": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OperationError"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "operationId",
+              "connectionId",
+              "kind",
+              "status",
+              "result",
+              "error"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "occurredAt",
+          "data"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

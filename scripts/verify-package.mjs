@@ -18,7 +18,7 @@ try {
   const [packed] = JSON.parse(npm(['pack', '--json']));
   archive = resolve(packed.filename);
   const files = new Set(packed.files.map((file) => file.path));
-  for (const required of ['package.json', 'dist/main.js', 'dist/admin.js', 'migrations/001.sql', 'README.md', 'LICENSE']) {
+  for (const required of ['package.json', 'dist/main.js', 'dist/admin.js', 'migrations/001.sql', 'openapi.json', 'README.md', 'LICENSE']) {
     assert.ok(files.has(required), `Release archive is missing ${required}`);
   }
   for (const migration of readdirSync('migrations').filter((name) => name.endsWith('.sql'))) {

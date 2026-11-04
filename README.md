@@ -6,6 +6,8 @@ A self-hosted JSON API that connects a client backend to merchant stores. Each c
 
 The first connector targets Shopify Admin GraphQL **2026-10**. It supports merchant authorization, paginated product reads and durable product title changes. This is a development build. The installation, latency, recovery and live-store release gates are tracked in [GitHub issues](https://github.com/mithundas79/commerce-gateway/issues). WooCommerce and Amazon are planned.
 
+The [OpenAPI 3.1 contract](openapi.json) describes tenant authentication, requests, responses, asynchronous operation polling, browser authorization, and signed completion notifications. `GET /v1/health` checks the API and PostgreSQL with a tenant bearer key. Worker heartbeat is measured separately by Docker health checks.
+
 ## Install and connect a store
 
 Follow the [installation and recovery instructions](release/README.md) to start the API, worker and PostgreSQL. A publicly reachable HTTPS origin is required for merchant authorization. Register the exact URL `https://YOUR-GATEWAY/oauth/shopify/callback` in the Shopify app. Use the `write_products` scope for the product workflow and select webhooks API version `2026-10`. Provision a tenant for each independently administered client. Each tenant can authorize multiple stores.
