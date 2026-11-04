@@ -22,9 +22,21 @@ New merchant authorizations query Shopify's authenticated shop identity and pers
 
 A verified numeric Shopify shop ID has one retained tenant and canonical domain for each app client ID. Ownership survives uninstall and reinstall. A second tenant or domain alias cannot claim that ID. An exact-domain reinstall by the existing owner remains supported. Verified `shop/redact` removes the shop's stable-ID registry entry together with its domain owner mapping.
 
-Automatic domain rename and tenant ownership transfer require operator reconciliation. A callback rejected with HTTP 409 and `SHOP_IDENTITY_RECONCILIATION_REQUIRED` has preserved the original credentials, operations and owner. Preserve the installation backup and pause affected API/worker traffic. Verify the numeric shop ID, original owner tenant, app client ID and current canonical domain directly with the merchant and Shopify app administration. Do not retry consent under a second tenant or delete owner rows to force a claim. This version has no automated alias migration command. Resume the affected installation only after a reviewed migration has reconciled its credentials, connections, queued operations, lifecycle receipts and ownership records together.
+Automatic domain rename and tenant ownership transfer require operator reconciliation. A callback rejected with HTTP 409 and `SHOP_IDENTITY_RECONCILIATION_REQUIRED` preserves the gateway's saved credentials, operations and owner. Shopify token exchange precedes numeric-ID verification, so verify whether the original owner's authorization requires renewal after a rejected alias attempt. Preserve the installation backup and pause affected API/worker traffic. Verify the numeric shop ID, original owner tenant, app client ID and current canonical domain directly with the merchant and Shopify app administration. Do not retry consent under a second tenant or delete owner rows to force a claim. This version has no automated alias migration command. Resume the affected installation only after a reviewed migration has reconciled its credentials, connections, queued operations, lifecycle receipts and ownership records together.
 
-Migration 008 rejects duplicate or inconsistent preexisting app/shop-ID associations with the same reconciliation error and rolls back without choosing a tenant or changing merchant rows. Keep the previous installation stopped if migration fails. Inspect the affected records through a restricted administrative database session, retain the backup, and resolve ownership with the merchant before applying a reviewed data migration. Never erase an ambiguous row as an automatic repair. Legacy rows without an authenticated numeric ID retain the exact-domain path until a successful authorization captures that ID.
+Before upgrading a populated deployment, create and verify its backup using the [existing installation and recovery guide](README.md). From that deployment's existing installation directory, stop the old API and worker before replacing application or bundle files.
+
+```bash
+docker compose stop api worker
+```
+
+Apply the verified update in that same directory using its existing `.env`, `.secrets`, tenant/API/encryption keys and PostgreSQL volume. Then run the installer with the saved origin and database configuration.
+
+```bash
+bash release/install.sh
+```
+
+The installer applies migrations against that existing database before starting the updated services. Migration 008 rejects duplicate or inconsistent preexisting app/shop-ID associations with the same reconciliation error and rolls back without choosing a tenant or changing merchant rows. Keep the previous installation stopped if migration fails. Inspect the affected records through a restricted administrative database session, retain the backup, and resolve ownership with the merchant before applying a reviewed data migration. Never erase an ambiguous row as an automatic repair. Legacy rows without an authenticated numeric ID retain the exact-domain path until a successful authorization captures that ID.
 
 Lifecycle handling checks the stable owner before creating a protective hold and again before destructive reconciliation. A renamed alias or inconsistent registry returns 409 without acknowledging a receipt as completed. A queued receipt whose ownership became inconsistent moves to `action_required` with `IDENTITY_RECONCILIATION_REQUIRED`, preserving credentials and merchant data for operator review.
 
