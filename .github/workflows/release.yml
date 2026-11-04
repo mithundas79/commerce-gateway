@@ -53,7 +53,9 @@ jobs:
           npm run build
           npm run test:integration
       - name: Validate shell scripts
-        run: for script in release/*.sh; do bash -n "$script"; done
+        run: |
+          for script in release/*.sh; do bash -n "$script"; done
+          node --check release/measure-footprint.mjs
       - name: Select bundle version
         id: version
         env:
@@ -74,7 +76,10 @@ jobs:
           CI: 'true'
           BUNDLE_VERSION: ${{ steps.version.outputs.version }}
           BUNDLE_ARCH: ${{ matrix.arch }}
-        run: bash release/smoke-install.sh "release-artifacts/commerce-gateway-$BUNDLE_VERSION-linux-$BUNDLE_ARCH.tar.gz"
+          RESOURCE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          export GATEWAY_FOOTPRINT_REPORT="$GITHUB_WORKSPACE/release-artifacts/footprint-$BUNDLE_ARCH.json"
+          bash release/smoke-install.sh "release-artifacts/commerce-gateway-$BUNDLE_VERSION-linux-$BUNDLE_ARCH.tar.gz"
       - uses: actions/upload-artifact@v4
         with:
           name: commerce-gateway-linux-${{ matrix.arch }}
