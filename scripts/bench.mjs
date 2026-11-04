@@ -45,21 +45,21 @@ export async function runLoad({ requests, concurrency, request }) {
   resourceTimer.unref();
   try {
     await Promise.all(Array.from({ length: Math.min(concurrency, requests) }, async () => {
-    while (next < requests) {
-      const index = next++;
-      const began = performance.now();
-      try {
-        await request(index);
-      } catch (error) {
-        errors++;
-        // Fixed error codes only: never print request credentials or provider data.
-        const code = typeof error?.code === 'string' && /^[A-Z_0-9]{1,80}$/.test(error.code)
-          ? error.code : 'REQUEST_FAILED';
-        errorCounts[code] = (errorCounts[code] ?? 0) + 1;
-      } finally {
-        samples.push(performance.now() - began);
+      while (next < requests) {
+        const index = next++;
+        const began = performance.now();
+        try {
+          await request(index);
+        } catch (error) {
+          errors++;
+          // Fixed error codes only: never print request credentials or provider data.
+          const code = typeof error?.code === 'string' && /^[A-Z_0-9]{1,80}$/.test(error.code)
+            ? error.code : 'REQUEST_FAILED';
+          errorCounts[code] = (errorCounts[code] ?? 0) + 1;
+        } finally {
+          samples.push(performance.now() - began);
+        }
       }
-    }
     }));
   } finally {
     clearInterval(resourceTimer);
