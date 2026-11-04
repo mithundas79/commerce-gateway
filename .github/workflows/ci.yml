@@ -44,6 +44,7 @@ jobs:
         id: build
       - run: npm run test:integration
       - name: Measure local gateway overhead
+        shell: bash
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           BENCH_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
