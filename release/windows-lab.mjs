@@ -226,7 +226,12 @@ export async function runLab(options) {
 }
 
 if(process.argv[1] && resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
-  try {const result=await runLab(labOptions(process.argv.slice(2)));if(result.passed===false) process.exitCode=1;}
+  try {
+    const args=process.argv.length>2?process.argv.slice(2):JSON.parse(process.env.CG_LAB_OPTIONS_JSON??'[]');
+    delete process.env.CG_LAB_OPTIONS_JSON;
+    if(!Array.isArray(args) || args.some(value=>typeof value!=='string')) fail('INVALID_LAB_ARGUMENTS');
+    const result=await runLab(labOptions(args));if(result.passed===false) process.exitCode=1;
+  }
   catch(error) {
     const code=/^[A-Z][A-Z0-9_]+$/.test(error.message)?error.message:'LAB_STEP_FAILED';
     console.error(JSON.stringify({acceptance:'windows-disposable-lab',passed:false,error:code}));process.exitCode=1;

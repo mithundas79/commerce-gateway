@@ -13,7 +13,6 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $arguments = @(
-    (Join-Path $PSScriptRoot 'windows-lab.mjs'),
     '--settings', $ShopifyEnvPath, '--origin', $PublicOrigin, '--shop', $Shop,
     '--bash', $GitBashPath
 )
@@ -22,5 +21,14 @@ if ($AllowMutation) {
 }
 if ($Resume) { $arguments += '--resume' }
 if ($NewRun) { $arguments += '--new-run' }
-& node @arguments
-exit $LASTEXITCODE
+# Windows PowerShell 5.1 native argument quoting can remove literal title quotes.
+# JSON in the child environment preserves every character without shell parsing.
+$previousArguments = $env:CG_LAB_OPTIONS_JSON
+try {
+    $env:CG_LAB_OPTIONS_JSON = ConvertTo-Json -InputObject $arguments -Compress
+    & node (Join-Path $PSScriptRoot 'windows-lab.mjs')
+    $result = $LASTEXITCODE
+} finally {
+    $env:CG_LAB_OPTIONS_JSON = $previousArguments
+}
+exit $result
