@@ -63,6 +63,7 @@ The installer has already provisioned the default tenant in `.env` and its key i
 ```bash
 bash <<'BASH'
 set -Eeuo pipefail
+set -o noclobber
 umask 077
 mkdir -p .secrets/tenants
 chmod 700 .secrets/tenants
@@ -76,7 +77,30 @@ docker compose run --rm --no-deps -T --env-from-file "$tenant_file" api node dis
 BASH
 ```
 
-If provisioning fails after the file is written, retry only the final `docker compose run ... bootstrap` command with that file. It is idempotent for the same tenant/key. Securely transfer its `API_KEY` value to the client's secret manager; never send `.env` or `MASTER_KEY` to a client. Include `.secrets/tenants` in your encrypted off-host secret backup: `release/backup.sh` currently copies only the installer's bootstrap key, so these additional client key files need separate backup. A lost raw client key cannot be recovered from its database hash.
+If provisioning fails after the file is written, retry only the final `docker compose run ... bootstrap` command with that file. It is idempotent for the same tenant/key. Securely transfer its `API_KEY` value to the client's secret manager; never send `.env` or `MASTER_KEY` to a client. `release/backup.sh` includes `.secrets/tenants` when present. A lost raw client key cannot be recovered from its database hash.
+
+To rotate a client's API key, create an additional key for the same tenant, install it in the client's secret manager, and confirm authenticated requests succeed. Then revoke the old key. Both keys work during this handover; bootstrap never reactivates a revoked key.
+
+```bash
+bash <<'BASH'
+set -Eeuo pipefail
+set -o noclobber
+umask 077
+old=.secrets/tenants/acme.env
+next=.secrets/tenants/acme-next.env
+test ! -e "$next" || { printf '%s\n' 'Next key file already exists; reuse it.' >&2; exit 1; }
+tenant_id=$(sed -n 's/^TENANT_ID=//p' "$old")
+api_key=$(openssl rand -hex 32)
+printf 'TENANT_ID=%s\nAPI_KEY=%s\n' "$tenant_id" "$api_key" > "$next"
+unset api_key
+docker compose run --rm --no-deps -T --env-from-file "$next" api node dist/admin.js bootstrap
+BASH
+# After the client has switched and tested the new key:
+docker compose run --rm --no-deps -T --env-from-file .secrets/tenants/acme.env \
+  api node dist/admin.js revoke-api-key
+```
+
+`revoke-api-key` requires the key and its matching tenant; repeated revocation is safe. It blocks subsequent API requests and does not cancel operations already accepted. For a compromised key, revoke immediately before completing the replacement handover. These examples rotate an additional client key. If rotating the installer's default key, also update `.secrets/bootstrap-api-key` to the new active raw value with mode `600`; otherwise the next reinstall correctly rejects the revoked saved key.
 
 ## Configure the client's Shopify app
 
@@ -117,9 +141,9 @@ curl --fail http://127.0.0.1:3000/readyz
 bash release/backup.sh /secure/encrypted/backup-location
 ```
 
-This takes a transaction-consistent `pg_dump` and copies the matching durable encryption/API secrets. Backups contain plaintext secrets and customer/provider data: keep them on encrypted storage with restricted access. Verify restore in an isolated environment regularly; a dump without the matching master key cannot recover encrypted provider credentials.
+This takes a transaction-consistent `pg_dump` and copies the matching durable encryption/API secrets, including additional `.secrets/tenants` files when present. Backups contain plaintext secrets and customer/provider data: keep them on encrypted storage with restricted access. Verify restore in an isolated environment regularly; a dump without the matching master key cannot recover encrypted provider credentials.
 
-To restore into a clean checkout with the same application version, copy the backup's `env` to `.env` and `bootstrap-api-key` to `.secrets/bootstrap-api-key` (`mkdir -m 700 .secrets`; `chmod 600` both files). Start only PostgreSQL and restore before running the installer:
+To restore into a clean checkout with the same application version, copy the backup's `env` to `.env` and `bootstrap-api-key` to `.secrets/bootstrap-api-key` (`mkdir -m 700 .secrets`; `chmod 600` both files). Copy the backup's `tenants` directory to `.secrets/tenants` if present and restrict its directories to mode `700` and files to `600`. Start only PostgreSQL and restore before running the installer:
 
 ```bash
 if [ -f images.tar.gz ]; then docker load --input images.tar.gz; fi

@@ -268,8 +268,11 @@ test('Shopify Retry-After blocks later jobs on the same connection while another
   assert.equal(other.counts.writes, 1);
   assert.equal((await pool.query('SELECT status FROM operations WHERE id=$1', [otherId])).rows[0].status, 'succeeded');
   await pool.query('UPDATE connections SET worker_not_before=now() WHERE id=$1', [connectionA]);
+  await pool.query("UPDATE operations SET next_attempt_at=now() WHERE connection_id=$1 AND status='retry'", [connectionA]);
   const unblocked = shopifyHttpFixture();
   assert.equal(await runWorkerOnce({ pool, provider: unblocked.provider }), true);
+  assert.equal((await pool.query('SELECT status FROM operations WHERE id=$1', [later])).rows[0].status, 'queued');
+  assert.equal(await runWorkerOnce({ pool, provider: unblocked.provider }), true);
   assert.equal((await pool.query('SELECT status FROM operations WHERE id=$1', [later])).rows[0].status, 'succeeded');
-  assert.equal(unblocked.counts.writes, 1);
+  assert.equal(unblocked.counts.writes, 2);
 });

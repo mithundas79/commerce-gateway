@@ -54,7 +54,7 @@ test('webhook URLs enforce public HTTPS authority without credentials, alternate
   for(const value of ['http://hooks.example.com','https://user:secret@hooks.example.com','https://hooks.example.com:8443',
     'https://127.0.0.1','https://2130706433','https://[::1]','https://1.1.1.1','https://localhost',
     'https://service.local','https://service.internal','https://hooks.example.com.','https://hooks.example.com/#fragment','https://'+ 'a'.repeat(2050)]) {
-    assert.throws(() => validateNotificationUrl(value),undefined,value);
+    assert.throws(() => validateNotificationUrl(value),value);
   }
 });
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHmac, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { bootstrap, migrate, revokeApiKey } from '../../src/admin.js';
-import { PostgresStore } from '../../src/store.js';
+import { cleanupExpiredOAuth, PostgresStore } from '../../src/store.js';
 import { ShopifyOAuth } from '../../src/oauth.js';
 import { createRuntime } from '../../src/main.js';
 
@@ -53,6 +53,21 @@ test('PostgreSQL serializes independent refresh stores and atomically persists r
     let exchanged = false;
     await assert.rejects(otherStore.withLock(`${tenantB}:${shop}`,async () => {exchanged=true;}),/another tenant/);
     assert.equal(exchanged,false);
+  } finally {await f.close();}
+});
+
+test('PostgreSQL OAuth cleanup removes only an expired batch and retains live browser sessions',async () => {
+  const f = await fixture();
+  try {
+    for (const [id,interval] of [['expired-a','-2 minutes'],['expired-b','-1 minute'],['live','5 minutes']]) {
+      await f.pool.query(`INSERT INTO oauth_states(state_hash,tenant_id,shop,browser_binding_hash,expires_at) VALUES($1,$2,'runtime.myshopify.com','binding',clock_timestamp()+$3::interval)`,[id,f.tenant,interval]);
+      await f.pool.query(`INSERT INTO oauth_browser_starts(ticket_hash,tenant_id,shop,expires_at) VALUES($1,$2,'runtime.myshopify.com',clock_timestamp()+$3::interval)`,[id,f.tenant,interval]);
+    }
+    assert.deepEqual(await cleanupExpiredOAuth(f.pool,1),{states:1,browserStarts:1});
+    assert.deepEqual((await f.pool.query('SELECT state_hash FROM oauth_states ORDER BY state_hash')).rows.map(row => row.state_hash),['expired-b','live']);
+    assert.deepEqual(await cleanupExpiredOAuth(f.pool,1),{states:1,browserStarts:1});
+    assert.deepEqual(await cleanupExpiredOAuth(f.pool,1),{states:0,browserStarts:0});
+    assert.equal((await f.pool.query('SELECT count(*)::int AS count FROM oauth_browser_starts')).rows[0].count,1);
   } finally {await f.close();}
 });
 

@@ -18,5 +18,9 @@ mv "$backup_dir/database.dump.pending" "$backup_dir/database.dump"
 cp .env "$backup_dir/env"
 cp .secrets/bootstrap-api-key "$backup_dir/bootstrap-api-key"
 chmod 600 "$backup_dir/"*
+if [[ -d .secrets/tenants ]]; then
+  cp -R .secrets/tenants "$backup_dir/tenants"
+  chmod -R go-rwx "$backup_dir/tenants"
+fi
 printf '%s\n' 'commerce-gateway backup v1; PostgreSQL 18 custom-format dump; secrets are plaintext, store on encrypted backup media.' > "$backup_dir/README.txt"
 printf 'Backup saved: %s\n' "$backup_dir"

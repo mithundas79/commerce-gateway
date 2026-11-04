@@ -47,6 +47,14 @@ Reads accept `first` (1–100) and the previous page's opaque `after` cursor. A 
 
 The worker honors provider throttling and applies bounded backoff. After an ambiguous write, it reads the product to determine whether the requested title is present. A terminal `uncertain` result requires reconciliation. Provider response time is separate from gateway admission latency.
 
+### Receive completion events
+
+A tenant can register a public HTTPS endpoint using the `configure-notification` admin command. When an operation first reaches `succeeded`, `failed` or `uncertain`, its status and notification are committed together. Delivery is at least once. Use `x-commerce-event-id` as the deduplication key and send a 2xx response after recording the event durably.
+
+Verify `x-commerce-signature` before processing the JSON. The expected value is `sha256=` followed by the hex HMAC-SHA256 of the timestamp, event ID and raw UTF-8 request body, separated by periods. Use the tenant's notification signing secret, compare signatures in constant time, and check the Unix-seconds `x-commerce-timestamp` against a short clock-skew allowance. Retries reuse the event ID and body with a fresh delivery timestamp.
+
+Registration affects future terminal transitions. Rotating or disabling an endpoint invalidates pending deliveries to its previous configuration. The operation remains retrievable through the authenticated polling endpoint.
+
 ## Develop
 
 Use Node.js 26 and PostgreSQL 18. Run the integration tests and benchmarks against a disposable database.

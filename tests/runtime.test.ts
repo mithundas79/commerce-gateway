@@ -5,7 +5,7 @@ import type { Pool } from 'pg';
 import { encryptSecret, decryptSecret } from '../src/crypto.js';
 import { bootstrap, revokeApiKey, publicBaseUrl, runAdmin } from '../src/admin.js';
 import { createRuntime, readBinding } from '../src/main.js';
-import { PostgresStore } from '../src/store.js';
+import { cleanupExpiredOAuth, PostgresStore } from '../src/store.js';
 
 const master = 'a1'.repeat(32);
 const tenant = '11111111-1111-4111-8111-111111111111';
@@ -128,4 +128,16 @@ test('cross-process refresh lock verifies app/shop ownership before invoking exc
 test('admin help works without database or secret environment', async () => {
   await runAdmin(['--help'],{});
   await assert.rejects(runAdmin(['invalid'],{}),/Unknown command/);
+});
+
+test('OAuth orphan cleanup uses a bounded database-time batch and preserves operation history',async () => {
+  let sql = ''; let values:unknown[] = [];
+  const pool = {query:async (query:string,params:unknown[]) => {sql=query;values=params;return {rows:[{states:3,browser_starts:2}]};}} as unknown as Pool;
+  assert.deepEqual(await cleanupExpiredOAuth(pool,25),{states:3,browserStarts:2});
+  assert.deepEqual(values,[25]);
+  assert.match(sql,/expires_at <= statement_timestamp\(\)/);
+  assert.equal((sql.match(/LIMIT \$1 FOR UPDATE SKIP LOCKED/g) ?? []).length,2);
+  assert.ok(!sql.includes('operations'));
+  await assert.rejects(cleanupExpiredOAuth(pool,0),/batch/);
+  await assert.rejects(cleanupExpiredOAuth(pool,10001),/batch/);
 });

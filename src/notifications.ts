@@ -27,6 +27,8 @@ export interface NotificationOptions {
   maxBackoffMs?: number;
   random?: () => number;
   now?: () => number;
+  onHealthy?: () => Promise<void> | void;
+  onUnhealthy?: () => Promise<void> | void;
 }
 
 class DeliveryError extends Error {
@@ -195,7 +197,8 @@ export async function runNotificationOnce(options: NotificationOptions): Promise
 export async function startNotifications(options: NotificationOptions & {signal:AbortSignal;pollMs?:number}): Promise<void> {
   while(!options.signal.aborted) {
     let worked=false;
-    try { worked=await runNotificationOnce(options); } catch { /* DB outage: durable leases can be reclaimed. */ }
+    try { worked=await runNotificationOnce(options); await options.onHealthy?.(); }
+    catch { try { await options.onUnhealthy?.(); } catch { /* Health reporting must not terminate recovery. */ } }
     if(!worked && !options.signal.aborted) await new Promise<void>(resolve => {
       const done=() => {clearTimeout(timer);options.signal.removeEventListener('abort',done);resolve();};
       const timer=setTimeout(done,options.pollMs ?? 1000);

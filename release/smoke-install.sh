@@ -68,13 +68,19 @@ unset api_key
 # Exercise encryption in the real application, then prove the matching key survives restore.
 "${compose[@]}" run --rm --no-deps -T -e "TENANT_ID=$tenant_id" -e SHOPIFY_CLIENT_ID=ci-client \
   -e SHOPIFY_CLIENT_SECRET=ci-encrypted-restore-probe -e SHOPIFY_SCOPES=write_products api node dist/admin.js configure-shopify
+mkdir -p .secrets/tenants
+printf 'TENANT_ID=%s\nAPI_KEY=%s\n' "$tenant_id" "$(cat .secrets/bootstrap-api-key)" > .secrets/tenants/restore-probe.env
 bash release/backup.sh "$temporary/backups"
 backup_dir=$(find "$temporary/backups" -mindepth 1 -maxdepth 1 -type d)
 [[ -s "$backup_dir/database.dump" && -f "$backup_dir/env" && -f "$backup_dir/bootstrap-api-key" ]]
+cmp .secrets/tenants/restore-probe.env "$backup_dir/tenants/restore-probe.env"
 "${compose[@]}" down --volumes
 # A fresh database plus recovered files models loss of the installation volume.
 cp "$backup_dir/env" .env
 cp "$backup_dir/bootstrap-api-key" .secrets/bootstrap-api-key
+rm .secrets/tenants/restore-probe.env
+cp -R "$backup_dir/tenants/." .secrets/tenants/
+cmp .secrets/tenants/restore-probe.env "$backup_dir/tenants/restore-probe.env"
 "${compose[@]}" up -d --wait --wait-timeout 120 db
 "${compose[@]}" exec -T db pg_restore --username=gateway --dbname=gateway --exit-on-error < "$backup_dir/database.dump"
 bash release/install.sh

@@ -5,6 +5,24 @@ import { decryptSecret, encryptSecret, validateMasterKey } from './crypto.js';
 import type { OfflineTokens, OAuthState, OAuthStateStore, OAuthTokenStore, ShopifyAppConfig } from './oauth.js';
 import { ConnectorError } from './shopify.js';
 
+/** Bounded maintenance uses database time and never touches operation/idempotency history. */
+export async function cleanupExpiredOAuth(pool: Pick<Pool,'query'>, batchSize = 1000): Promise<{states:number;browserStarts:number}> {
+  if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 10_000) throw new Error('OAuth cleanup batch must contain 1-10000 rows');
+  const result = await pool.query(`WITH expired_states AS (
+      SELECT state_hash FROM oauth_states WHERE expires_at <= statement_timestamp()
+      ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED
+    ), deleted_states AS (
+      DELETE FROM oauth_states s USING expired_states e WHERE s.state_hash=e.state_hash RETURNING 1
+    ), expired_starts AS (
+      SELECT ticket_hash FROM oauth_browser_starts WHERE expires_at <= statement_timestamp()
+      ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED
+    ), deleted_starts AS (
+      DELETE FROM oauth_browser_starts s USING expired_starts e WHERE s.ticket_hash=e.ticket_hash RETURNING 1
+    ) SELECT (SELECT count(*)::int FROM deleted_states) AS states,
+      (SELECT count(*)::int FROM deleted_starts) AS browser_starts`, [batchSize]);
+  return {states:result.rows[0].states,browserStarts:result.rows[0].browser_starts};
+}
+
 export class PostgresStore implements OAuthStateStore, OAuthTokenStore {
   private readonly context = new AsyncLocalStorage<PoolClient>();
   constructor(readonly pool: Pool, private readonly masterKey: string) { validateMasterKey(masterKey); }

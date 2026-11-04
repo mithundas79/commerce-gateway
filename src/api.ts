@@ -88,12 +88,15 @@ export function buildApi(options: ApiOptions): FastifyInstance {
   });
 
   app.setErrorHandler((error, request, reply) => {
-    if (error.validation) return reply.code(400).send({ error: 'INVALID_REQUEST' });
-    if (error.statusCode === 413) return reply.code(413).send({ error: 'REQUEST_TOO_LARGE' });
-    if (error.statusCode && error.statusCode >= 400 && error.statusCode < 500) {
-      return reply.code(error.statusCode).send({ error: 'INVALID_REQUEST' });
+    const failure = error instanceof Error ? error as Error & { validation?: unknown; statusCode?: unknown; code?: unknown } : undefined;
+    if (failure?.validation) return reply.code(400).send({ error: 'INVALID_REQUEST' });
+    const statusCode = typeof failure?.statusCode === 'number' ? failure.statusCode : 500;
+    if (statusCode === 413) return reply.code(413).send({ error: 'REQUEST_TOO_LARGE' });
+    if (statusCode >= 400 && statusCode < 500) {
+      return reply.code(statusCode).send({ error: 'INVALID_REQUEST' });
     }
-    request.log.error({ code: error.code ?? 'INTERNAL_ERROR' }, 'Gateway request failed');
+    const code = typeof failure?.code === 'string' && /^[A-Z0-9_]{1,80}$/.test(failure.code) ? failure.code : 'INTERNAL_ERROR';
+    request.log.error({ code }, 'Gateway request failed');
     return reply.code(500).send({ error: 'INTERNAL_ERROR' });
   });
 

@@ -7,7 +7,7 @@ import { publicBaseUrl, required } from './admin.js';
 import { decryptSecret, validateMasterKey } from './crypto.js';
 import { ShopifyOAuth, hashOAuthValue } from './oauth.js';
 import { ConnectorError, ShopifyConnector, validateShop } from './shopify.js';
-import { PostgresStore } from './store.js';
+import { cleanupExpiredOAuth, PostgresStore } from './store.js';
 import { startWorker, type ProductContext } from './worker.js';
 import { startNotifications } from './notifications.js';
 
@@ -106,9 +106,13 @@ export async function main(env = process.env): Promise<void> {
       await rm(heartbeat,{ force:true });
       let workerHealthy = false;
       let notificationsHealthy = false;
+      let lastWorkerSuccess = 0;
+      let lastNotificationSuccess = 0;
+      let nextCleanupAt = 0;
       let heartbeatUpdate = Promise.resolve();
       const publishHeartbeat = () => {
         heartbeatUpdate = heartbeatUpdate.catch(() => {}).then(() => workerHealthy && notificationsHealthy
+          && Date.now()-lastWorkerSuccess < 120_000 && Date.now()-lastNotificationSuccess < 120_000
           ? writeFile(heartbeat,String(Date.now()),{ mode:0o600 })
           : rm(heartbeat,{ force:true }));
         return heartbeatUpdate;
@@ -116,10 +120,13 @@ export async function main(env = process.env): Promise<void> {
       try {
         await Promise.all([
           startWorker({ pool,provider,signal:stop.signal,
-            onHealthy:() => {workerHealthy=true; return publishHeartbeat();},
+            onHealthy:async () => {
+              if (Date.now() >= nextCleanupAt) {await cleanupExpiredOAuth(pool); nextCleanupAt=Date.now()+60_000;}
+              workerHealthy=true; lastWorkerSuccess=Date.now(); return publishHeartbeat();
+            },
             onUnhealthy:() => {workerHealthy=false; return publishHeartbeat();} }),
           startNotifications({ pool,signal:stop.signal,decryptSecret:(ciphertext,tenant) => decryptSecret(ciphertext,master,`notification:${tenant}`),
-            onHealthy:() => {notificationsHealthy=true; return publishHeartbeat();},
+            onHealthy:() => {notificationsHealthy=true; lastNotificationSuccess=Date.now(); return publishHeartbeat();},
             onUnhealthy:() => {notificationsHealthy=false; return publishHeartbeat();} }),
         ]);
       } finally { stop.abort(); await heartbeatUpdate.catch(() => {}); await rm(heartbeat,{ force:true }); }

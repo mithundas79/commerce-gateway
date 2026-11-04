@@ -17,14 +17,14 @@ Each measured workload uses concurrent HTTP clients: authenticated product reads
 | `BENCH_DATABASE_URL` | Required | Disposable PostgreSQL database; `TEST_DATABASE_URL` is also accepted |
 | `BENCH_REQUESTS` | `1000` | Measured requests per workload |
 | `BENCH_CONCURRENCY` | `16` | Concurrent clients |
-| `BENCH_WARMUP` | `100` | Unmeasured warmup requests per route/workload |
+| `BENCH_WARMUP` | `100` | Unmeasured warmup requests for reads, unique enqueues, and replays |
 | `BENCH_POOL_SIZE` | `16` | PostgreSQL pool maximum |
 | `BENCH_REPLAY_KEYS` | `20` | Previously inserted keys used by replay traffic |
 | `BENCH_TIMEOUT_MS` | `10000` | Individual HTTP and database statement timeout |
 | `BENCH_P95_MS` | `100` | Maximum passing p95 latency for every workload |
 | `BENCH_API_MODULE` | `dist/api.js` | Optional API module path relative to the working directory |
 
-The JSON report includes nearest-rank p50/p95/p99, errors, throughput, Node/V8/architecture/CPU/OS/PostgreSQL versions, configuration, and durability checks. Any request error, incorrect durable row count, idempotency failure, or p95 above the threshold produces exit code 1.
+The contended workload uses the already warmed enqueue route and starts with a fresh shared key. Request logging is disabled and this setting is recorded. The JSON report includes nearest-rank p50/p95/p99, errors, throughput, Node/V8/architecture/CPU/OS/PostgreSQL versions, configuration, and durability checks. Any request error, incorrect durable row count, idempotency failure, or p95 above the threshold produces exit code 1.
 
 Latency includes loopback HTTP, authentication, validation, PostgreSQL, and response decoding. Shopify network time and worker completion time are excluded. This is closed-loop load with a fresh dataset, so it establishes a reproducible local overhead check rather than production capacity. Use the same runtime, machine, database topology, pool, dataset, and concurrency for comparisons. A noisy shared CI runner can fail the default target; any threshold override is recorded in the report and should be disclosed with results.
 
