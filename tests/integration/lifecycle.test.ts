@@ -149,6 +149,7 @@ test('a concurrent reinstall supersedes an old provider proof and a later identi
   const blocked=new Promise<void>(resolve => {release=resolve;});
   globalThis.fetch=async () => {started();await blocked;return new Response('{}',{status:401});};
   try {
+    const queued=await f.operation();
     const payload={id:123,myshopify_domain:shop};
     const delivered=f.send('app-uninstalled',payload);
     let timer:ReturnType<typeof setTimeout> | undefined;
@@ -159,6 +160,8 @@ test('a concurrent reinstall supersedes an old provider proof and a later identi
     const reinstalled=await f.install();release();await delivered;
     let current=(await f.pool.query('SELECT * FROM connections WHERE id=$1',[f.connection.id])).rows[0];
     assert.equal(current.authorization_generation,reinstalled.authorization_generation);assert.equal(current.revoked_at,null);assert.equal(current.lifecycle_hold,false);
+    const superseded=(await f.pool.query('SELECT status,error FROM operations WHERE id=$1',[queued])).rows[0];
+    assert.equal(superseded.status,'failed');assert.equal(superseded.error.code,'SHOPIFY_AUTHORIZATION_CHANGED');
     // A first-seen old event delivered to the new installation is harmless while its token works.
     globalThis.fetch=async () => new Response(JSON.stringify({data:{shop:{id:'gid://shopify/Shop/123',myshopifyDomain:shop}}}));
     await f.send('app-uninstalled',payload);
