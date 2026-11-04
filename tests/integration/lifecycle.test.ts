@@ -18,7 +18,10 @@ const config={clientId:'lifecycle-app',clientSecret:'lifecycle-secret',redirectU
 async function fixture() {
   const schema=`lifecycle_${randomUUID().replaceAll('-','')}`;
   const admin=new Pool({connectionString:databaseUrl});await admin.query(`CREATE SCHEMA ${schema}`);
-  const pool=new Pool({connectionString:databaseUrl,options:`-c search_path=${schema}`,max:8});await migrate(pool);
+  const pool=new Pool({connectionString:databaseUrl,options:`-c search_path=${schema}`,max:8});
+  let runtime:ReturnType<typeof createRuntime> | undefined;
+  try {
+  await migrate(pool);
   const tenant=randomUUID();const key=`lifecycle-${randomUUID()}`;await bootstrap(pool,{TENANT_ID:tenant,API_KEY:key});
   const store=new PostgresStore(pool,master);await store.configureApp(tenant,config);
   async function install(domain=shop,shopId='123') {
@@ -26,20 +29,28 @@ async function fixture() {
     return (await pool.query('SELECT * FROM connections WHERE tenant_id=$1 AND shop=$2',[tenant,domain])).rows[0];
   }
   const connection=await install();
-  const runtime=createRuntime(pool,master,'https://gateway.example');
+  const nativeFetch=globalThis.fetch;
+  runtime=createRuntime(pool,master,'https://gateway.example',false,{fetch:async (url,init) => {
+    if(globalThis.fetch===nativeFetch) throw new Error('Lifecycle test Shopify transport must be mocked');
+    return globalThis.fetch(url,init);
+  }});
+  const activeRuntime=runtime;
   async function send(topic:keyof typeof lifecycleTopics,payload:object,headers:Record<string,string>={},app=config) {
     const raw=Buffer.from(JSON.stringify(payload));
-    const response=await runtime.app.inject({method:'POST',url:`/webhooks/shopify/${app.clientId}/${topic}/${webhookBinding(app,topic)}`,
+    const response=await activeRuntime.app.inject({method:'POST',url:`/webhooks/shopify/${app.clientId}/${topic}/${webhookBinding(app,topic)}`,
       headers:{'content-type':'application/json','x-shopify-topic':lifecycleTopics[topic],'x-shopify-shop-domain':shop,
         'x-shopify-hmac-sha256':createHmac('sha256',app.clientSecret).update(raw).digest('base64'),...headers},payload:raw});
-    await runtime.lifecycle.reconcile();
+    await activeRuntime.lifecycle.reconcile();
     return response;
   }
   async function operation(status='queued',dispatched=false) {
     const id=randomUUID();await pool.query(`INSERT INTO operations(id,tenant_id,connection_id,kind,idempotency_key,payload,status,dispatch_started_at,deadline_at)
-      VALUES($1,$2,$3,'product_title_update',$1,'{"productId":"gid://shopify/Product/1","title":"Private title"}',$4,CASE WHEN $5 THEN clock_timestamp() ELSE NULL END,clock_timestamp()+interval '1 hour')`,[id,tenant,connection.id,status,dispatched]);return id;
+      VALUES($1,$2,$3,'product_title_update',$6,'{"productId":"gid://shopify/Product/1","title":"Private title"}',$4,CASE WHEN $5 THEN clock_timestamp() ELSE NULL END,clock_timestamp()+interval '1 hour')`,[id,tenant,connection.id,status,dispatched,id]);return id;
   }
-  return {pool,store,tenant,key,connection,runtime,send,install,operation,close:async () => {await runtime.app.close();await pool.end();await admin.query(`DROP SCHEMA ${schema} CASCADE`);await admin.end();}};
+  return {pool,store,tenant,key,connection,runtime:activeRuntime,send,install,operation,close:async () => {await activeRuntime.app.close();await pool.end();await admin.query(`DROP SCHEMA ${schema} CASCADE`);await admin.end();}};
+  } catch(error) {
+    await runtime?.app.close();await pool.end();await admin.query(`DROP SCHEMA ${schema} CASCADE`);await admin.end();throw error;
+  }
 }
 
 test('fresh 401 uninstall invalidates tokens, fences queued/in-flight work, and body receipts survive changed unsigned delivery IDs',async () => {

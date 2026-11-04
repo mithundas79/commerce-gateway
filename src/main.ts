@@ -22,11 +22,11 @@ export function readBinding(cookie: string | undefined): string {
   return /^[A-Za-z0-9_-]{43}$/.test(value) ? value : '';
 }
 
-export function createRuntime(pool: Pool, masterKey: string, baseUrl: string, logger = false) {
+export function createRuntime(pool: Pool, masterKey: string, baseUrl: string, logger = false, options: { fetch?: typeof globalThis.fetch } = {}) {
   const base = publicBaseUrl(baseUrl);
   const store = new PostgresStore(pool, masterKey);
-  const connector = new ShopifyConnector();
-  const oauth = new ShopifyOAuth({ getApp: tenant => store.getApp(tenant), states: store, tokens: {
+  const connector = new ShopifyConnector({fetch:options.fetch});
+  const oauth = new ShopifyOAuth({ fetch:options.fetch, getApp: tenant => store.getApp(tenant), states: store, tokens: {
     get: (tenant,shop) => store.get(tenant,shop), delete: (tenant,shop) => store.delete(tenant,shop),
     withLock: (key,work) => store.withLock(key,work),
     save: async (tenant,shop,tokens) => {
