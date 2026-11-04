@@ -81,6 +81,7 @@ test('real PostgreSQL browser start and HMAC callback enforce cookie binding and
       assert.equal(String(url),'https://runtime.myshopify.com/admin/api/2026-10/graphql.json');
       assert.equal((init?.headers as Record<string,string>)['X-Shopify-Access-Token'],'callback-access');
       const body = JSON.parse(String(init?.body));
+      if (body.query.includes('GatewayShopIdentity')) return new Response(JSON.stringify({data:{shop:{id:'gid://shopify/Shop/987',myshopifyDomain:'runtime.myshopify.com'}}}));
       const product = {id:'gid://shopify/Product/123',title:'Fixture title',updatedAt:'2026-11-04T00:00:00Z'};
       if (body.query.includes('mutation ProductTitleUpdate')) {
         writes++;

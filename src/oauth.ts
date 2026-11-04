@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { ConnectorError, retryAfterMs, validateShop, type ShopifyFetch } from './shopify.js';
 
 export interface ShopifyAppConfig {
@@ -7,6 +7,26 @@ export interface ShopifyAppConfig {
   redirectUri: string;
   scopes: string[];
   allowedReturnUrls: string[];
+}
+export const lifecycleTopics = {
+  'app-uninstalled': 'app/uninstalled',
+  'customers-data-request': 'customers/data_request',
+  'customers-redact': 'customers/redact',
+  'shop-redact': 'shop/redact',
+} as const;
+export type LifecycleTopic = keyof typeof lifecycleTopics;
+
+/** Separate domain from the raw body signature, because Shopify does not sign topic headers. */
+export function webhookBinding(app: Pick<ShopifyAppConfig,'clientId'|'clientSecret'>, topic: LifecycleTopic): string {
+  return createHmac('sha256', app.clientSecret).update(JSON.stringify(['commerce-gateway:shopify-topic-url:v1',app.clientId,topic])).digest('base64url');
+}
+export function webhookSubscriptions(app: ShopifyAppConfig, origin: string): string {
+  const entries = Object.entries(lifecycleTopics).map(([key,topic]) => {
+    const field = key === 'app-uninstalled' ? 'topics' : 'compliance_topics';
+    const uri = `${origin}/webhooks/shopify/${encodeURIComponent(app.clientId)}/${key}/${webhookBinding(app,key as LifecycleTopic)}`;
+    return `[[webhooks.subscriptions]]\n${field} = [${JSON.stringify(topic)}]\nuri = ${JSON.stringify(uri)}`;
+  });
+  return `[webhooks]\napi_version = "2026-10"\n\n${entries.join('\n\n')}\n`;
 }
 export interface OAuthState {
   stateHash: string;
@@ -23,6 +43,9 @@ export interface OAuthStateStore {
   consume(stateHash: string, browserBindingHash: string, shop: string, now: number): Promise<OAuthState | undefined>;
 }
 export interface OfflineTokens {
+  /** Authenticated shop identity and installation generation, preserved across refresh. */
+  shopId?: string;
+  authorizationId?: string;
   accessToken: string;
   refreshToken: string;
   expiresAt: number;
@@ -136,7 +159,7 @@ export class ShopifyOAuth {
       if (lockedApp.clientId !== app.clientId || !verifyOAuthHmac(input.query, lockedApp.clientSecret)) throw new ConnectorError('AUTHENTICATION', 'Shopify app credentials changed during authorization', 403);
       if (stored.returnUrl && !lockedApp.allowedReturnUrls.includes(stored.returnUrl)) throw new ConnectorError('VALIDATION','Return URL is no longer allowlisted',400);
       const tokens = await this.exchange(shop, lockedApp, { code, expiring: '1' });
-      await this.options.tokens.save(stored.tenantId, shop, tokens);
+      await this.options.tokens.save(stored.tenantId, shop, { ...tokens, authorizationId: randomUUID() });
       completedScopes = lockedApp.scopes;
     });
     return { tenantId: stored.tenantId, shop, scopes: completedScopes, ...(stored.returnUrl ? { returnUrl: stored.returnUrl } : {}) };
@@ -182,7 +205,7 @@ export class ShopifyOAuth {
       }
       try {
         const next = await this.exchange(shop, await this.app(tenantId), { grant_type: 'refresh_token', refresh_token: current.refreshToken });
-        await this.options.tokens.save(tenantId, shop, next);
+        await this.options.tokens.save(tenantId, shop, { ...next, shopId: current.shopId, authorizationId: current.authorizationId });
         return next.accessToken;
       } catch (error) {
         if (error instanceof ConnectorError && error.code === 'AUTHENTICATION') await this.options.tokens.delete(tenantId, shop);

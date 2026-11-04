@@ -75,7 +75,7 @@ export function buildApi(options: ApiOptions): FastifyInstance {
   app.addHook('onRequest', async (request, reply) => {
     reply.header('cache-control', 'no-store');
     const path = request.url.split('?', 1)[0];
-    if (publicRoutes.has(path)) return;
+    if (publicRoutes.has(request.routeOptions.url ?? path)) return;
     const authorization = request.headers.authorization;
     const match = typeof authorization === 'string' ? /^Bearer ([A-Za-z0-9._~+\/-]{1,512}=*)$/i.exec(authorization) : null;
     if (!match || match[1].length > 512) {
@@ -123,7 +123,7 @@ export function buildApi(options: ApiOptions): FastifyInstance {
   }, async (request) => {
     const first = request.query.first ? Number(request.query.first) : 100;
     const result = await pool.query(
-      'SELECT id, shop, scopes, created_at, updated_at FROM connections WHERE tenant_id = $1 AND revoked_at IS NULL AND ($2::uuid IS NULL OR id < $2::uuid) ORDER BY id DESC LIMIT $3',
+      'SELECT id, shop, scopes, created_at, updated_at FROM connections WHERE tenant_id = $1 AND revoked_at IS NULL AND NOT lifecycle_hold AND ($2::uuid IS NULL OR id < $2::uuid) ORDER BY id DESC LIMIT $3',
       [getTenantId(request), request.query.after ?? null, first + 1],
     );
     const rows = result.rows.slice(0, first);
@@ -133,7 +133,7 @@ export function buildApi(options: ApiOptions): FastifyInstance {
 
   async function findConnection(request: FastifyRequest, connectionId: string): Promise<Connection | undefined> {
     const result = await pool.query<Connection>(
-      'SELECT id, tenant_id, shop, scopes, created_at, updated_at FROM connections WHERE tenant_id = $1 AND id = $2 AND revoked_at IS NULL',
+      'SELECT id, tenant_id, shop, scopes, created_at, updated_at FROM connections WHERE tenant_id = $1 AND id = $2 AND revoked_at IS NULL AND NOT lifecycle_hold',
       [getTenantId(request), connectionId],
     );
     return result.rows[0];
@@ -203,7 +203,7 @@ export function buildApi(options: ApiOptions): FastifyInstance {
       const inserted = await pool.query(
         `INSERT INTO operations (id, tenant_id, connection_id, kind, idempotency_key, payload, deadline_at)
          SELECT $1, $2, id, 'product_title_update', $4, $5::jsonb, now() + ($6::double precision * interval '1 millisecond')
-         FROM connections WHERE tenant_id = $2 AND id = $3 AND revoked_at IS NULL
+         FROM connections WHERE tenant_id = $2 AND id = $3 AND revoked_at IS NULL AND NOT lifecycle_hold FOR SHARE
          ON CONFLICT (tenant_id, connection_id, kind, idempotency_key) DO NOTHING
          RETURNING ${operationColumns}`,
         [randomUUID(), tenantId, connectionId, idempotencyKey, JSON.stringify(payload), operationTtlMs],
@@ -248,3 +248,4 @@ export function buildApi(options: ApiOptions): FastifyInstance {
   );
   return app;
 }
+

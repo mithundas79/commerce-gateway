@@ -6,6 +6,7 @@ import { encryptSecret, validateMasterKey } from './crypto.js';
 import { PostgresStore } from './store.js';
 import { configureNotificationEndpoint, disableNotificationEndpoint } from './notifications.js';
 import { releaseUncertainOperation } from './worker.js';
+import { webhookSubscriptions } from './lifecycle.js';
 
 export const help = `Commerce Gateway administration
   migrate                 Apply checksummed SQL migrations (DATABASE_URL)
@@ -14,12 +15,15 @@ export const help = `Commerce Gateway administration
   configure-shopify       Store encrypted app credentials for TENANT_ID
                           SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET, SHOPIFY_SCOPES (comma-separated)
                           optional SHOPIFY_RETURN_URLS (comma-separated), PUBLIC_BASE_URL, MASTER_KEY
+  shopify-webhooks         Print secret subscription TOML for TENANT_ID (MASTER_KEY, PUBLIC_BASE_URL)
+  shopify-lifecycle        List pending/action-required provider events for TENANT_ID
+  retry-shopify-lifecycle Retry unresolved events for TENANT_ID after credential reconciliation
   configure-notification Store completion webhook (TENANT_ID, NOTIFICATION_URL, NOTIFICATION_SECRET, MASTER_KEY)
   disable-notification   Disable completion webhook for TENANT_ID
   release-uncertain      Release a product ordering hold after operator reconciliation
                           TENANT_ID, OPERATION_ID, ACKNOWLEDGE_DELAYED_WRITE_RISK=true
   --help                  Show this help
-Secrets are accepted through environment variables and never printed.`;
+Secrets are accepted through environment variables. shopify-webhooks prints secret URLs for protected configuration only.`;
 
 export function required(env: NodeJS.ProcessEnv, key: string): string {
   const value = env[key];
@@ -99,10 +103,25 @@ export async function revokeApiKey(pool: Pool, env: NodeJS.ProcessEnv): Promise<
 
 export async function runAdmin(args: string[], env = process.env): Promise<void> {
   if (args.length === 0 || args.length === 1 && ['--help','-h','help'].includes(args[0]!)) { console.log(help); return; }
-  if (args.length !== 1 || !['migrate','bootstrap','revoke-api-key','configure-shopify','configure-notification','disable-notification','release-uncertain'].includes(args[0]!)) throw new Error('Unknown command; use --help');
+  if (args.length !== 1 || !['migrate','bootstrap','revoke-api-key','configure-shopify','shopify-webhooks','shopify-lifecycle','retry-shopify-lifecycle','configure-notification','disable-notification','release-uncertain'].includes(args[0]!)) throw new Error('Unknown command; use --help');
   const pool = new Pool({ connectionString: required(env,'DATABASE_URL'), connectionTimeoutMillis: 10_000 });
   try {
     switch (args[0]) {
+      case 'shopify-webhooks': {
+        const config = await new PostgresStore(pool,required(env,'MASTER_KEY')).prepareWebhookSubscriptions(tenantId(env));
+        process.stdout.write(webhookSubscriptions(config,publicBaseUrl(required(env,'PUBLIC_BASE_URL'))));
+        break;
+      }
+      case 'shopify-lifecycle': {
+        const events = await pool.query(`SELECT id,topic,status,attempt_count,last_error,created_at,updated_at
+          FROM shopify_lifecycle_events WHERE tenant_id=$1 AND status IN ('pending','action_required') ORDER BY created_at`,[tenantId(env)]);
+        console.log(JSON.stringify(events.rows));
+        break;
+      }
+      case 'retry-shopify-lifecycle':
+        await pool.query(`UPDATE shopify_lifecycle_events SET status='pending',attempt_count=0,next_attempt_at=clock_timestamp()
+          WHERE tenant_id=$1 AND status='action_required'`,[tenantId(env)]);
+        break;
       case 'migrate': await migrate(pool); break;
       case 'bootstrap': await bootstrap(pool,env); break;
       case 'revoke-api-key': await revokeApiKey(pool,env); break;

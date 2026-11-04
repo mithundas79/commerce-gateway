@@ -12,12 +12,16 @@ export interface Operation {
   deadline_at: Date | string;
   fence_token: string | number;
   dispatch_started_at: Date | string | null;
+  authorization_generation?: string;
 }
 export interface ProductContext {
   tenantId: string;
   connectionId: string;
   productId: string;
   signal: AbortSignal;
+  operationId?: string;
+  fenceToken?: string | number;
+  authorizationGeneration?: string;
 }
 export interface OperationProvider {
   readProductTitle(context: ProductContext): Promise<string | null>;
@@ -90,10 +94,11 @@ async function bounded<T>(fn: (signal: AbortSignal) => Promise<T>, timeoutMs: nu
 export async function claimOperation(pool: Pick<Pool, 'query'>, leaseMs = 90_000): Promise<Operation | null> {
   const result = await pool.query<Operation>(`
     WITH candidate AS (
-      SELECT o.id FROM operations o
+      SELECT o.id,c.authorization_generation FROM operations o
       JOIN connections c ON c.id = o.connection_id AND c.tenant_id = o.tenant_id
       WHERE ((o.status IN ('queued', 'retry', 'recovering') AND o.next_attempt_at <= clock_timestamp())
          OR (o.status = 'running' AND o.lease_until <= clock_timestamp()))
+        AND NOT c.lifecycle_hold
         AND (c.worker_not_before <= clock_timestamp() OR o.deadline_at <= clock_timestamp())
         AND (o.deadline_at <= clock_timestamp() OR NOT EXISTS (
           SELECT 1 FROM operations prior WHERE prior.tenant_id = o.tenant_id
@@ -110,7 +115,7 @@ export async function claimOperation(pool: Pick<Pool, 'query'>, leaseMs = 90_000
       fence_token = fence_token + 1,
       lease_until = clock_timestamp() + ($1::double precision * interval '1 millisecond'),
       updated_at = clock_timestamp()
-    FROM candidate c WHERE o.id = c.id RETURNING o.*
+    FROM candidate c WHERE o.id = c.id RETURNING o.*,c.authorization_generation
   `, [leaseMs]);
   return result.rows[0] ?? null;
 }
@@ -174,7 +179,7 @@ export async function runWorkerOnce(options: WorkerOptions): Promise<boolean> {
   try {
     const connection = await pool.query(`
       SELECT id FROM connections WHERE id = $1 AND tenant_id = $2
-        AND revoked_at IS NULL AND 'write_products' = ANY(scopes)
+        AND revoked_at IS NULL AND NOT lifecycle_hold AND 'write_products' = ANY(scopes)
     `, [operation.connection_id, operation.tenant_id]);
     const allowed = connection.rows.length > 0 && (!options.authorize
       || await bounded(signal => options.authorize!(operation, signal), Math.min(timeoutMs, deadline - now())));
@@ -183,7 +188,8 @@ export async function runWorkerOnce(options: WorkerOptions): Promise<boolean> {
       return true;
     }
     const context = { tenantId: operation.tenant_id, connectionId: operation.connection_id,
-      productId: operation.payload.productId };
+      productId: operation.payload.productId, operationId: operation.id, fenceToken: operation.fence_token,
+      authorizationGeneration: operation.authorization_generation };
     if (dispatched) {
       const title = await bounded(signal => provider.readProductTitle({ ...context, signal }), Math.min(timeoutMs, Math.max(1, deadline - now())));
       if (title === operation.payload.title) {
@@ -200,7 +206,7 @@ export async function runWorkerOnce(options: WorkerOptions): Promise<boolean> {
       WHERE id = $1 AND tenant_id = $2 AND fence_token = $3 AND status = 'running'
         AND lease_until > clock_timestamp() AND deadline_at > clock_timestamp()
         AND EXISTS (SELECT 1 FROM connections c WHERE c.id = operations.connection_id
-          AND c.tenant_id = operations.tenant_id AND c.revoked_at IS NULL
+          AND c.tenant_id = operations.tenant_id AND c.revoked_at IS NULL AND NOT c.lifecycle_hold
           AND 'write_products' = ANY(c.scopes) AND c.worker_not_before <= clock_timestamp())
         AND NOT EXISTS (
           SELECT 1 FROM operations prior WHERE prior.tenant_id = operations.tenant_id

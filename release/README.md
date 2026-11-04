@@ -184,3 +184,8 @@ CI=true bash release/smoke-install.sh release-artifacts/commerce-gateway-dev-lin
 ```
 
 Only a `v*` Git tag can trigger the publishing job, after both architecture checks succeed. PR and main-branch runs produce downloadable CI artifacts without creating a public release.
+
+## Shopify lifecycle subscriptions
+
+Complete the four app-specific webhook subscriptions and recovery monitoring in [Shopify lifecycle configuration](shopify-lifecycle.md) for every configured Shopify app before accepting merchant traffic. The guide includes the exact protected TOML generator, raw-byte signature handling, uninstall and privacy erasure behavior, replay protection and operator handling for unresolved installation state.
+
