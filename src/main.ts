@@ -84,6 +84,15 @@ export function createRuntime(pool: Pool, masterKey: string, baseUrl: string, lo
     if (!row) throw new ConnectorError('PERMISSION','Connection is not authorized',403);
     const accessToken = await oauth.accessToken(context.tenantId,row.shop);
     context.signal.throwIfAborted();
+    if (context.operationId !== undefined) {
+      const live = await pool.query(`SELECT o.id FROM operations o JOIN connections c
+        ON c.id=o.connection_id AND c.tenant_id=o.tenant_id
+        WHERE o.id=$1 AND o.tenant_id=$2 AND o.connection_id=$3 AND o.fence_token=$4
+          AND o.status='running' AND o.lease_until>clock_timestamp()
+          AND c.revoked_at IS NULL AND NOT c.lifecycle_hold`,
+      [context.operationId,context.tenantId,context.connectionId,context.fenceToken]);
+      if (!live.rows.length) throw new ConnectorError('PERMISSION','Operation authorization changed',403);
+    }
     return { shop:row.shop as string, accessToken, productId:context.productId, signal:context.signal };
   }
   const provider = {

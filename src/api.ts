@@ -203,7 +203,7 @@ export function buildApi(options: ApiOptions): FastifyInstance {
       const inserted = await pool.query(
         `INSERT INTO operations (id, tenant_id, connection_id, kind, idempotency_key, payload, deadline_at)
          SELECT $1, $2, id, 'product_title_update', $4, $5::jsonb, now() + ($6::double precision * interval '1 millisecond')
-         FROM connections WHERE tenant_id = $2 AND id = $3 AND revoked_at IS NULL AND NOT lifecycle_hold
+         FROM connections WHERE tenant_id = $2 AND id = $3 AND revoked_at IS NULL AND NOT lifecycle_hold FOR SHARE
          ON CONFLICT (tenant_id, connection_id, kind, idempotency_key) DO NOTHING
          RETURNING ${operationColumns}`,
         [randomUUID(), tenantId, connectionId, idempotencyKey, JSON.stringify(payload), operationTtlMs],

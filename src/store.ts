@@ -91,6 +91,8 @@ export class PostgresStore implements OAuthStateStore, OAuthTokenStore {
       await this.db.query(`INSERT INTO shopify_shop_owners (client_id,shop,tenant_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [app.clientId,shop,tenantId]);
       const owner = (await this.db.query('SELECT tenant_id FROM shopify_shop_owners WHERE client_id=$1 AND shop=$2', [app.clientId,shop])).rows[0];
       if (owner?.tenant_id !== tenantId) throw new Error('Shopify shop authorization belongs to another tenant');
+      // Serialize enqueue snapshots with authorization replacement before fencing held work.
+      if (tokens.authorizationId) await this.db.query('SELECT id FROM connections WHERE tenant_id=$1 AND shop=$2 FOR UPDATE',[tenantId,shop]);
       if (tokens.authorizationId) await this.db.query(`UPDATE operations SET
         status=CASE WHEN dispatch_started_at IS NULL THEN 'failed' ELSE 'uncertain' END,
         error='{"code":"SHOPIFY_AUTHORIZATION_CHANGED"}'::jsonb,fence_token=fence_token+1,

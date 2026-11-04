@@ -17,6 +17,8 @@ export interface ProductContext {
   tenantId: string;
   connectionId: string;
   productId: string;
+  operationId?: string;
+  fenceToken?: string | number;
   signal: AbortSignal;
 }
 export interface OperationProvider {
@@ -184,7 +186,7 @@ export async function runWorkerOnce(options: WorkerOptions): Promise<boolean> {
       return true;
     }
     const context = { tenantId: operation.tenant_id, connectionId: operation.connection_id,
-      productId: operation.payload.productId };
+      productId: operation.payload.productId, operationId: operation.id, fenceToken: operation.fence_token };
     if (dispatched) {
       const title = await bounded(signal => provider.readProductTitle({ ...context, signal }), Math.min(timeoutMs, Math.max(1, deadline - now())));
       if (title === operation.payload.title) {
