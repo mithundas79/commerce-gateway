@@ -10,12 +10,15 @@ const output = resolve('benchmark-comparison-output');
 await mkdir(output, { recursive: true });
 const pool = new Pool({ connectionString: databaseUrl, max: 1 });
 const results = [];
+const syntheticDelay = process.env.COMPARISON_MODE === 'synthetic-commit-delay';
 const benchmarkEntry = resolve(process.env.DIAGNOSTIC_BENCH_ENTRY ?? 'scripts/bench.mjs');
 
 async function snapshot() {
   await pool.query('SELECT pg_stat_clear_snapshot()');
   return (await pool.query(`SELECT clock_timestamp() AS at, pg_current_wal_insert_lsn()::text AS lsn,
     current_setting('track_wal_io_timing') AS wal_timing,
+    (SELECT setting FROM pg_settings WHERE name='commit_delay') AS commit_delay,
+    (SELECT setting FROM pg_settings WHERE name='commit_siblings') AS commit_siblings,
     (SELECT row_to_json(w) FROM pg_stat_wal w) AS wal,
     (SELECT json_agg(i ORDER BY backend_type,context) FROM pg_stat_io i WHERE object='wal') AS wal_io,
     (SELECT json_agg(s ORDER BY name) FROM pg_stat_slru s WHERE name LIKE 'MultiXact%' OR name LIKE 'multixact%') AS multixact,
@@ -75,9 +78,13 @@ try {
     sourceHashes.push({ path, ...hashes, identical: hashes.baseline === hashes.candidate });
   }
   // Pair one runs baseline/candidate, and pair two reverses the order on the same runner and service.
-  for (const [index, variant] of ['baseline', 'candidate', 'candidate', 'baseline'].entries()) {
+  const order = syntheticDelay ? ['baseline', 'candidate'] : ['baseline', 'candidate', 'candidate', 'baseline'];
+  for (const [index, variant] of order.entries()) {
     const before = await snapshot();
     if (before.wal_timing !== 'on') throw new Error('Disposable PostgreSQL WAL timing must be enabled');
+    if (syntheticDelay && (before.commit_delay !== '8000' || before.commit_siblings !== '0')) {
+      throw new Error('Synthetic commit-delay role settings were not applied');
+    }
     const prefix = resolve(output, `${index + 1}-${variant}`);
     const sourceSha = process.env[`${variant.toUpperCase()}_SHA`];
     const run = await benchmark(resolve('.bench', variant), prefix, sourceSha);
@@ -85,7 +92,11 @@ try {
     const after = await snapshot();
     const walBytes = Number((await pool.query('SELECT pg_wal_lsn_diff($1::pg_lsn,$2::pg_lsn) AS bytes',
       [after.lsn, before.lsn])).rows[0].bytes);
-    const result = { position: index + 1, variant, sha: sourceSha, telemetrySha: process.env.TELEMETRY_SHA, ...run,
+    const diagnostic = run.report?.workloads.find(workload => workload.name==='durable_unique_enqueue')?.diagnostics;
+    const settingsVerified = !syntheticDelay || [diagnostic?.before.settings,diagnostic?.after.settings].every(settings =>
+      settings?.commit_delay==='8000' && settings.commit_siblings==='0' && settings.fsync==='on' && settings.synchronous_commit==='on');
+    const result = { position: index + 1, variant, sha: sourceSha, telemetrySha: process.env.TELEMETRY_SHA,
+      measurementMode: syntheticDelay ? 'synthetic-commit-delay' : 'default-abba', settingsVerified, ...run,
       postgres: { scope: 'Whole benchmark invocation, including schema creation, warmup and cleanup. Cluster-wide counters may include background activity.',
         before, after, walBytes,
         walDelta: counterDeltas(before.wal, after.wal, ['wal_records', 'wal_fpi', 'wal_bytes', 'wal_buffers_full']),
@@ -99,8 +110,10 @@ try {
     results.push(result);
     console.log(`${index + 1} ${variant}: exit ${run.exitCode}, unique enqueue p95 ${run.report?.workloads?.find(row => row.name === 'durable_unique_enqueue')?.p95Ms ?? 'unavailable'} ms`);
   }
-  const lines = ['# Same-runner enqueue comparison', '',
-    'Existing benchmark, default 100 ms p95 gate, synchronous commit and fsync retained. Order is baseline/candidate, then candidate/baseline.', '',
+  const description = syntheticDelay
+    ? 'Supplemental synthetic commit coordination delay. Disposable gateway-role defaults set commit_delay=8000 microseconds and commit_siblings=0 for both fresh application variants. This adds an intentional pre-WAL-flush wait. It does not measure physical disk speed or replace default CI qualification. The original 100 ms p95 gate, fsync and synchronous_commit remain enabled. One baseline/candidate pair only.'
+    : 'Existing benchmark, default 100 ms p95 gate, synchronous commit and fsync retained. Order is baseline/candidate, then candidate/baseline.';
+  const lines = [syntheticDelay ? '# Synthetic commit-delay mechanism comparison' : '# Same-runner enqueue comparison', '', description, '',
     '| Position | Variant | Workload | p50 ms | p95 ms | p99 ms | Errors | Passed |',
     '| --- | --- | --- | ---: | ---: | ---: | ---: | --- |'];
   for (const result of results) {
@@ -126,14 +139,20 @@ try {
     const observed = event => diagnostic?.waitObservations.filter(row => row.waitEvent===event).reduce((sum,row) => sum+row.backends,0) ?? 0;
     lines.push(`| ${result.position} | ${result.variant} | ${before && after ? after.fsyncs-before.fsyncs : 'unavailable'} | ${before && after ? (after.fsync_time-before.fsync_time).toFixed(3) : 'unavailable'} | ${observed('advisory')} | ${observed('WalSync')} |`);
   }
+  lines.push('', '| Variant | Report commit_delay microseconds | Report commit_siblings | Both boundary settings verified |',
+    '| --- | ---: | ---: | --- |');
+  for (const result of results) {
+    const settings = result.report?.workloads.find(workload => workload.name==='durable_unique_enqueue')?.diagnostics?.before.settings;
+    lines.push(`| ${result.variant} | ${settings?.commit_delay ?? 'unavailable'} | ${settings?.commit_siblings ?? 'unavailable'} | ${result.settingsVerified} |`);
+  }
   lines.push('', 'Targeted figures cover only the unique enqueue workload using the same pinned telemetry on both runtimes. These counters are cluster-wide and include observer/background activity. Wait observations count sampled backends, not elapsed wait time.',
     '', `Telemetry commit ${process.env.TELEMETRY_SHA}. Baseline ${process.env.BASELINE_SHA}. Candidate ${process.env.CANDIDATE_SHA}.`);
   const summary = `${lines.join('\n')}\n`;
   await writeFile(resolve(output, 'summary.md'), summary);
-  await writeFile(resolve(output, 'comparison.json'), `${JSON.stringify({ telemetrySha: process.env.TELEMETRY_SHA, benchmarkEntry, telemetryHashes, sourceHashes, results }, null, 2)}\n`);
+  await writeFile(resolve(output, 'comparison.json'), `${JSON.stringify({ measurementMode: syntheticDelay ? 'synthetic-commit-delay' : 'default-abba', telemetrySha: process.env.TELEMETRY_SHA, benchmarkEntry, telemetryHashes, sourceHashes, results }, null, 2)}\n`);
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, summary);
   console.log(summary);
-  if (results.some(result => result.exitCode !== 0 || !result.report?.passed)) process.exitCode = 1;
+  if (results.some(result => result.exitCode !== 0 || !result.report?.passed || !result.settingsVerified)) process.exitCode = 1;
 } finally {
   await pool.end();
 }

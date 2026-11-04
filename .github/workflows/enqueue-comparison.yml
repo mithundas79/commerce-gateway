@@ -1,4 +1,4 @@
-name: Temporary enqueue comparison
+name: Temporary synthetic commit-delay comparison
 
 on:
   push:
@@ -30,6 +30,7 @@ jobs:
       BASELINE_SHA: fce4bc9e2c68de2348f73739c7fdaad0078b490b
       CANDIDATE_SHA: bf9bf27cc60ecb104ecb626cc681e1fcbd612760
       TELEMETRY_SHA: 7f59bb3dbc0bd972088cc48d453fe8b34d54e6b8
+      COMPARISON_MODE: synthetic-commit-delay
       BENCH_DATABASE_URL: postgres://gateway:ci-local-password@localhost:5432/gateway_test
       NODE_ENV: test
     steps:
@@ -62,7 +63,9 @@ jobs:
         run: |
           docker exec "$POSTGRES_CONTAINER" psql -U gateway -d gateway_test -c "ALTER SYSTEM SET track_wal_io_timing=on"
           docker exec "$POSTGRES_CONTAINER" psql -U gateway -d gateway_test -c "SELECT pg_reload_conf()"
-      - name: Compare baseline and candidate in both orders
+          docker exec "$POSTGRES_CONTAINER" psql -U gateway -d gateway_test -c "ALTER ROLE gateway SET commit_delay=8000"
+          docker exec "$POSTGRES_CONTAINER" psql -U gateway -d gateway_test -c "ALTER ROLE gateway SET commit_siblings=0"
+      - name: Compare one matched synthetic-delay baseline and candidate pair
         env:
           DIAGNOSTIC_BENCH_ENTRY: .bench/telemetry/scripts/bench.mjs
           BENCH_DIAGNOSTICS: '1'
@@ -71,6 +74,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: enqueue-comparison
+          name: enqueue-synthetic-commit-delay
           path: benchmark-comparison-output/
           if-no-files-found: error
