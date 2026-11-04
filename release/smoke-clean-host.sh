@@ -50,7 +50,7 @@ tar -cz -C "$backup" . | TRANSPORT_KEY_FILE="$temporary/transport.key" node "$de
 daemon=$("${outer[@]}" run --detach --privileged --env DOCKER_TLS_CERTDIR= \
   --publish 127.0.0.1:3000:3001 --publish 127.0.0.1:3443:3443 \
   --mount "type=bind,src=$temporary/socket,dst=/var/run/qualification" \
-  --mount "type=bind,src=$destination,dst=$destination" \
+  --mount "type=bind,src=$destination,dst=/qualification" \
   docker:28-dind dockerd --host=unix:///var/run/qualification/docker.sock --group "$(id -g)")
 export DOCKER_HOST="unix://$temporary/socket/docker.sock"
 unset DOCKER_CONTEXT DOCKER_TLS_VERIFY DOCKER_CERT_PATH
@@ -58,6 +58,7 @@ for attempt in {1..60}; do
   if docker info >/dev/null 2>&1; then break; fi
   sleep 1
 done
+"${outer[@]}" exec "$daemon" test -f /qualification/backup.enc
 docker info >/dev/null
 [[ -z $(docker ps -aq) && -z $(docker volume ls -q) && -z $(docker image ls -aq) ]]
 source_id=$("${outer[@]}" info --format '{{.ID}}')
@@ -70,7 +71,7 @@ cd "$destination/commerce-gateway"
 sha256sum --check --strict SHA256SUMS
 docker load --input images.tar.gz
 cat "$temporary/transport.key" | docker run --rm --interactive \
-  --user "$(id -u):$(id -g)" --mount "type=bind,src=$destination,dst=/transfer" \
+  --user "$(id -u):$(id -g)" --mount "type=bind,src=/qualification,dst=/transfer" \
   commerce-gateway:local node /transfer/transport.mjs decrypt /transfer/backup.tar.gz
 mkdir "$destination/recovered"
 tar -xzf "$destination/backup.tar.gz" -C "$destination/recovered"
@@ -104,7 +105,7 @@ https({ key: readFileSync('/transfer/server.key'), cert: readFileSync('/transfer
 http(proxy).listen(3001, '0.0.0.0');
 JS
 docker run --detach --name recovery-ingress --network host --user "$(id -u):$(id -g)" \
-  --mount "type=bind,src=$destination,dst=/transfer,readonly" \
+  --mount "type=bind,src=/qualification,dst=/transfer,readonly" \
   commerce-gateway:local node /transfer/proxy.mjs >/dev/null
 for attempt in {1..30}; do
   if curl --fail --silent https://localhost:3443/proxy-ready >/dev/null; then break; fi
