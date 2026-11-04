@@ -45,7 +45,7 @@ curl -sS -i -X POST "$GATEWAY/v1/connections/$CONNECTION_ID/product-title-update
   -d '{"productId":"gid://shopify/Product/123","title":"Updated sample title"}'
 ```
 
-Reads accept `first` (1-100) and the previous page's opaque `after` cursor. A write returns HTTP 202 after PostgreSQL records the operation. Poll the response's `Location` using the same bearer key. Retry a lost response with the same idempotency key and payload. Reusing a key with a changed payload returns HTTP 409.
+Reads accept `first` (1–100) and the previous page's opaque `after` cursor. A write returns HTTP 202 after PostgreSQL records the operation. Poll the response's `Location` using the same bearer key. Retry a lost response with the same idempotency key and payload. Reusing a key with a changed payload returns HTTP 409.
 
 The worker honors provider throttling and applies bounded backoff. After an ambiguous write, it reads the product to determine whether the requested title is present. A terminal `uncertain` result requires reconciliation. Provider response time is separate from gateway admission latency.
 

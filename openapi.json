@@ -1823,9 +1823,7 @@
         "type": "object",
         "properties": {
           "shop": {
-            "type": "string",
-            "maxLength": 253,
-            "description": "Canonical lower-case myshopify.com domain. Invalid domains return INVALID_SHOP."
+            "$ref": "#/components/schemas/Shop"
           },
           "returnUrl": {
             "type": "string",
