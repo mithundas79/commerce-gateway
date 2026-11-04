@@ -194,7 +194,12 @@ export async function runWorkerOnce(options: WorkerOptions): Promise<boolean> {
           AND 'write_products' = ANY(c.scopes) AND c.worker_not_before <= clock_timestamp())
       RETURNING id
     `, [operation.id, operation.tenant_id, operation.fence_token]);
-    if (marked.rows.length === 0) return true;
+    if (marked.rows.length === 0) {
+      // A concurrent cooldown/revocation can land after claim. Release a still-owned lease;
+      // a stale worker's completion remains fenced and simply affects no row.
+      await retry({ code: 'DISPATCH_PRECONDITION_CHANGED', retryable: true, ambiguous: false });
+      return true;
+    }
     if (now() >= deadline) {
       await finish('failed', null, { code: 'DEADLINE_EXCEEDED' });
       return true;

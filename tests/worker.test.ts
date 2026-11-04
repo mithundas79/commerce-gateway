@@ -54,7 +54,7 @@ function fixture(overrides: Partial<Operation> = {}, settings: { scope?: boolean
 test('empty queue returns false; claims use SKIP LOCKED and increment fencing tokens', async () => {
   const f = fixture({}, { empty: true });
   assert.equal(await runWorkerOnce(f.options), false);
-  assert.match(f.calls[0]!.sql, /FOR UPDATE SKIP LOCKED/);
+  assert.match(f.calls[0]!.sql, /FOR UPDATE OF o SKIP LOCKED/);
   assert.match(f.calls[0]!.sql, /fence_token = fence_token \+ 1/);
   assert.equal(f.writes, 0);
 });
@@ -108,6 +108,30 @@ test('definitively rejected throttled write can retry and clears dispatch ambigu
   assert.equal(f.finish.params[3], 'retry');
   assert.equal(f.finish.params[6], 2_000);
   assert.equal(f.finish.params[7], false);
+  assert.equal(f.finish.params[8], 2_000);
+});
+
+test('provider cooldown outlives one job deadline without retrying that job early', async () => {
+  const f = fixture({ deadline_at: new Date(now + 1_000) });
+  f.provider.updateProductTitle = async () => {
+    throw { code: 'RATE_LIMITED', retryable: true, ambiguous: false, retryAfterMs: 600_000 };
+  };
+  await runWorkerOnce(f.options);
+  assert.equal(f.finish.params[3], 'retry');
+  assert.equal(f.finish.params[6], 1_000);
+  assert.equal(f.finish.params[8], 600_000);
+  assert.match(f.finish.sql, /FROM finished f/);
+  assert.match(f.calls[0]!.sql, /c.worker_not_before <= clock_timestamp\(\) OR o.deadline_at <= clock_timestamp\(\)/);
+});
+
+test('exhausted rate-limited job still persists the shared connection cooldown', async () => {
+  const f = fixture({ attempt_count: 8 });
+  f.provider.updateProductTitle = async () => {
+    throw { code: 'RATE_LIMITED', retryable: true, ambiguous: false, retryAfterMs: 600_000 };
+  };
+  await runWorkerOnce(f.options);
+  assert.equal(f.finish.params[3], 'failed');
+  assert.equal(f.finish.params[8], 600_000);
 });
 
 test('definitive validation errors are terminal', async () => {
@@ -132,7 +156,8 @@ test('stale worker cannot dispatch after a newer worker reclaimed the lease', as
   const f = fixture({}, { fence: false });
   await runWorkerOnce(f.options);
   assert.equal(f.writes, 0);
-  assert.equal(f.calls.filter(c => c.sql.includes('SET status = $4')).length, 0);
+  assert.equal(f.finish.params[3], 'retry');
+  assert.match(f.finish.sql, /fence_token = \$3/);
 });
 
 test('expired deadline fails undispatched work and marks dispatched work uncertain', async () => {

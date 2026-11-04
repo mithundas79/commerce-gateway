@@ -60,11 +60,24 @@ test('real PostgreSQL browser start and HMAC callback enforce cookie binding and
   const f = await fixture();
   const originalFetch = globalThis.fetch;
   let exchanges = 0;
-  globalThis.fetch = async () => {
+  let reads = 0; let writes = 0;
+  globalThis.fetch = async (url,init) => {
+    if (String(url).includes('/graphql.json')) {
+      assert.equal(String(url),'https://runtime.myshopify.com/admin/api/2026-10/graphql.json');
+      assert.equal((init?.headers as Record<string,string>)['X-Shopify-Access-Token'],'callback-access');
+      const body = JSON.parse(String(init?.body));
+      const product = {id:'gid://shopify/Product/123',title:'Fixture title',updatedAt:'2026-11-04T00:00:00Z'};
+      if (body.query.includes('mutation ProductTitleUpdate')) {
+        writes++;
+        return new Response(JSON.stringify({data:{productUpdate:{product:{...product,title:body.variables.product.title},userErrors:[]}}}));
+      }
+      reads++;
+      return new Response(JSON.stringify({data:{product}}));
+    }
     exchanges++;
     return new Response(JSON.stringify({access_token:'callback-access',refresh_token:'callback-refresh',expires_in:3600,refresh_token_expires_in:7_776_000,scope:'write_products'}));
   };
-  const {app} = createRuntime(f.pool,master,'https://gateway.example');
+  const {app,provider} = createRuntime(f.pool,master,'https://gateway.example');
   try {
     const connect = await app.inject({method:'POST',url:'/v1/shopify/connect',headers:{authorization:`Bearer ${f.key}`},payload:{shop:'runtime.myshopify.com',returnUrl:'https://client.example/connected'}});
     assert.equal(connect.statusCode,200);
@@ -87,5 +100,14 @@ test('real PostgreSQL browser start and HMAC callback enforce cookie binding and
     const replay = await app.inject({method:'GET',url,headers:{cookie}});
     assert.equal(replay.statusCode,403); assert.equal(exchanges,1);
     assert.equal((await f.pool.query('SELECT count(*)::int AS count FROM oauth_states')).rows[0].count,0);
+    const connection = (await f.pool.query('SELECT id FROM connections WHERE tenant_id=$1',[f.tenant])).rows[0];
+    const context = {tenantId:f.tenant,connectionId:connection.id,productId:'gid://shopify/Product/123',signal:new AbortController().signal};
+    assert.equal(await provider.readProductTitle(context),'Fixture title');
+    await provider.updateProductTitle({...context,title:'Changed title'});
+    assert.equal(reads,1); assert.equal(writes,1); assert.equal(exchanges,1);
+    await assert.rejects(provider.readProductTitle({...context,tenantId:randomUUID()}),/not authorized/);
+    await f.pool.query('UPDATE connections SET revoked_at=now() WHERE id=$1',[connection.id]);
+    await assert.rejects(provider.updateProductTitle({...context,title:'Must not dispatch'}),/not authorized/);
+    assert.equal(writes,1);
   } finally {globalThis.fetch=originalFetch; await app.close(); await f.close();}
 });

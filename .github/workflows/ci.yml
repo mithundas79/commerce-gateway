@@ -40,8 +40,11 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - run: node --test tests/bench.test.mjs
       - run: npm run build
       - run: npm run test:integration
+      - name: Measure local gateway overhead
+        run: BENCH_DATABASE_URL="$DATABASE_URL" npm run bench
       - name: Verify release archive
         run: node scripts/verify-package.mjs
       - name: Build container

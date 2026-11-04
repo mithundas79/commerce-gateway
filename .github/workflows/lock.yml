@@ -55,13 +55,7 @@ jobs:
           path: package-lock.json
           if-no-files-found: error
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
-      - run: npm run test:integration
-      - run: node scripts/verify-package.mjs
-      - run: docker build --tag commerce-gateway:lock-qualification .
-      - name: Commit only the qualified lock to the existing feature branch
+      - name: Commit only the installable lock to the existing feature branch
         if: steps.lock.outputs.created == 'true'
         shell: bash
         run: |
@@ -71,5 +65,14 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- package-lock.json
           test "$(git diff --cached --name-only)" = 'package-lock.json'
-          git commit -m 'build: lock qualified dependency versions'
+          git commit -m 'build: lock resolved dependency versions'
           git push origin HEAD:refs/heads/feature/shopify-gateway
+      - run: npm run typecheck
+      - run: npm test
+      - run: node --test tests/bench.test.mjs
+      - run: npm run build
+      - run: npm run test:integration
+      - name: Measure local gateway overhead
+        run: BENCH_DATABASE_URL="$DATABASE_URL" npm run bench
+      - run: node scripts/verify-package.mjs
+      - run: docker build --tag commerce-gateway:lock-qualification .

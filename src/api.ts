@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import type { Pool } from 'pg';
+import { ConnectorError } from './shopify.js';
 
 export interface Connection {
   id: string;
   tenant_id: string;
   shop: string;
-  token_ciphertext: string;
   scopes: string[];
   created_at: Date | string;
   updated_at: Date | string;
@@ -21,6 +21,8 @@ export interface ApiOptions {
   pool: Pool;
   readProducts: (connection: Connection, options: { first: number; after?: string }) => Promise<ProductPage>;
   logger?: boolean;
+  /** Optional structured-log destination, useful for observability and redaction checks. */
+  loggerStream?: { write: (line: string) => void };
   operationTtlMs?: number;
   /** Exact paths whose handlers do not require a gateway API key (e.g. OAuth callback). */
   publicRoutes?: string[];
@@ -62,12 +64,14 @@ export function buildApi(options: ApiOptions): FastifyInstance {
   }
   const app = Fastify({
     bodyLimit: 16 * 1024,
-    logger: options.logger ? { redact: ['req.headers.authorization', 'req.headers.cookie', 'req.url'] } : false,
+    logger: options.logger ? { redact: ['req.headers.authorization', 'req.headers.cookie', 'req.url'],
+      ...(options.loggerStream ? { stream: options.loggerStream } : {}) } : false,
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
   });
   const publicRoutes = new Set(['/healthz', '/readyz', ...(options.publicRoutes ?? [])]);
 
   app.addHook('onRequest', async (request, reply) => {
+    reply.header('cache-control', 'no-store');
     const path = request.url.split('?', 1)[0];
     if (publicRoutes.has(path)) return;
     const authorization = request.headers.authorization;
@@ -103,17 +107,25 @@ export function buildApi(options: ApiOptions): FastifyInstance {
     }
   });
 
-  app.get('/v1/connections', async (request) => {
+  app.get<{ Querystring: { first?: string; after?: string } }>('/v1/connections', {
+    schema: { querystring: { type: 'object', additionalProperties: false, properties: {
+      first: { type: 'string', pattern: '^(?:[1-9]|[1-9][0-9]|100)$' },
+      after: { type: 'string', format: 'uuid' },
+    } } },
+  }, async (request) => {
+    const first = request.query.first ? Number(request.query.first) : 100;
     const result = await pool.query(
-      'SELECT id, shop, scopes, created_at, updated_at FROM connections WHERE tenant_id = $1 AND revoked_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 100',
-      [getTenantId(request)],
+      'SELECT id, shop, scopes, created_at, updated_at FROM connections WHERE tenant_id = $1 AND revoked_at IS NULL AND ($2::uuid IS NULL OR id < $2::uuid) ORDER BY id DESC LIMIT $3',
+      [getTenantId(request), request.query.after ?? null, first + 1],
     );
-    return { connections: result.rows.map((row) => ({ id: row.id, shop: row.shop, scopes: row.scopes, createdAt: row.created_at, updatedAt: row.updated_at })) };
+    const rows = result.rows.slice(0, first);
+    return { connections: rows.map((row) => ({ id: row.id, shop: row.shop, scopes: row.scopes, createdAt: row.created_at, updatedAt: row.updated_at })),
+      pageInfo: { hasNextPage: result.rows.length > first, endCursor: rows.at(-1)?.id ?? null } };
   });
 
   async function findConnection(request: FastifyRequest, connectionId: string): Promise<Connection | undefined> {
     const result = await pool.query<Connection>(
-      'SELECT id, tenant_id, shop, token_ciphertext, scopes, created_at, updated_at FROM connections WHERE tenant_id = $1 AND id = $2 AND revoked_at IS NULL',
+      'SELECT id, tenant_id, shop, scopes, created_at, updated_at FROM connections WHERE tenant_id = $1 AND id = $2 AND revoked_at IS NULL',
       [getTenantId(request), connectionId],
     );
     return result.rows[0];
@@ -135,8 +147,20 @@ export function buildApi(options: ApiOptions): FastifyInstance {
       if (!connection) return reply.code(404).send({ error: 'CONNECTION_NOT_FOUND' });
       try {
         return await options.readProducts(connection, { first: request.query.first ? Number(request.query.first) : 25, ...(request.query.after ? { after: request.query.after } : {}) });
-      } catch {
-        return reply.code(502).send({ error: 'PROVIDER_UNAVAILABLE' });
+      } catch (error) {
+        if (error instanceof ConnectorError) {
+          if (error.code === 'AUTHENTICATION') return reply.code(409).send({ error: 'CONNECTION_REAUTHORIZATION_REQUIRED', retryable: false });
+          if (error.code === 'PERMISSION') return reply.code(403).send({ error: 'CONNECTION_PERMISSION_REQUIRED', retryable: false });
+          if (error.code === 'RATE_LIMITED' || error.code === 'TRANSIENT') {
+            const retryAfterMs = typeof error.retryAfterMs === 'number' && Number.isFinite(error.retryAfterMs)
+              ? Math.min(300_000, Math.max(1000, error.retryAfterMs)) : 1000;
+            return reply.header('retry-after', String(Math.ceil(retryAfterMs / 1000)))
+              .code(error.code === 'RATE_LIMITED' ? 429 : 503)
+              .send({ error: error.code === 'RATE_LIMITED' ? 'PROVIDER_RATE_LIMITED' : 'PROVIDER_UNAVAILABLE', retryable: true, retryAfterMs });
+          }
+          return reply.code(502).send({ error: error.code === 'API_VERSION_MISMATCH' ? 'PROVIDER_API_VERSION_MISMATCH' : 'PROVIDER_REJECTED', retryable: false });
+        }
+        return reply.code(502).send({ error: 'PROVIDER_UNAVAILABLE', retryable: true });
       }
     },
   );
