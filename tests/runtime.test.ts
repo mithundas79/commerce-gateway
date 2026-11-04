@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
 import { encryptSecret, decryptSecret } from '../src/crypto.js';
-import { bootstrap, publicBaseUrl, runAdmin } from '../src/admin.js';
+import { bootstrap, revokeApiKey, publicBaseUrl, runAdmin } from '../src/admin.js';
 import { createRuntime, readBinding } from '../src/main.js';
 import { PostgresStore } from '../src/store.js';
 
@@ -48,6 +48,16 @@ test('public origin and browser cookies reject ambiguous or unsafe values', () =
   assert.equal(readBinding(`other=x; __Host-shopify_oauth=${binding}`),binding);
   assert.equal(readBinding(`__Host-shopify_oauth=${binding}; __Host-shopify_oauth=${binding}`),'');
   assert.equal(readBinding('__Host-shopify_oauth=short'),'');
+});
+
+test('key revocation scopes updates to tenant and hashes raw key',async () => {
+  let values:unknown[] = [];
+  let sql = '';
+  const pool = {query:async (query:string,params:unknown[]) => {sql=query; values=params; return {rows:[{id:'key-id'}]};}} as unknown as Pool;
+  await revokeApiKey(pool,{TENANT_ID:tenant,API_KEY:key});
+  assert.match(sql,/WHERE tenant_id=\$1 AND token_hash=\$2/);
+  assert.deepEqual(values,[tenant,hash(key)]);
+  await assert.rejects(revokeApiKey({query:async () => ({rows:[]})} as unknown as Pool,{TENANT_ID:other,API_KEY:key}),/not found for this tenant/);
 });
 
 test('backend connect issues one-use browser ticket; browser start sets secure binding before consent', async () => {

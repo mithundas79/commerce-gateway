@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Pool } from 'pg';
-import { claimOperation, runWorkerOnce, type Operation, type OperationProvider } from '../src/worker.js';
+import { claimOperation, runWorkerOnce, startWorker, type Operation, type OperationProvider } from '../src/worker.js';
 
 const now = Date.now();
 const base: Operation = {
@@ -192,4 +192,31 @@ test('malformed durable payload is rejected before provider access', async () =>
 test('claimOperation supports an empty queue without a transaction connection', async () => {
   const f = fixture({}, { empty: true });
   assert.equal(await claimOperation(f.options.pool), null);
+});
+
+test('healthy empty polls refresh heartbeat; DB outages withdraw it without claiming health', async () => {
+  for (const databaseHealthy of [true, false]) {
+    const f = fixture({}, { empty: true });
+    const controller = new AbortController();
+    const callbacks: string[] = [];
+    if (!databaseHealthy) {
+      f.options.pool = { query: async () => { throw new Error('database down'); } } as unknown as Pick<Pool, 'query'>;
+    }
+    await startWorker({ ...f.options, signal: controller.signal,
+      onHealthy: () => { callbacks.push('healthy'); controller.abort(); },
+      onUnhealthy: () => { callbacks.push('unhealthy'); controller.abort(); },
+    });
+    assert.deepEqual(callbacks, [databaseHealthy ? 'healthy' : 'unhealthy']);
+  }
+});
+
+test('heartbeat refresh failure invokes unhealthy cleanup', async () => {
+  const f = fixture({}, { empty: true });
+  const controller = new AbortController();
+  let cleaned = false;
+  await startWorker({ ...f.options, signal: controller.signal,
+    onHealthy: () => { throw new Error('heartbeat filesystem unavailable'); },
+    onUnhealthy: () => { cleaned = true; controller.abort(); },
+  });
+  assert.equal(cleaned, true);
 });

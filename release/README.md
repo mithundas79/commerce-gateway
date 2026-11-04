@@ -44,6 +44,63 @@ The API key is in `.secrets/bootstrap-api-key`; it is never printed. `.env` cont
 
 The Compose project name is fixed at `commerce-gateway` to keep its volume stable if the checkout moves. Run one instance per Docker host unless you deliberately override the project name and port. `docker compose down` preserves data; `docker compose down --volumes` deletes it.
 
+## Operator and client onboarding
+
+Run these commands from the installation directory after the installer succeeds. The host operator owns Docker/database access and provisions tenants. Each SaaS backend receives its own tenant API key and keeps it in its server-side secret manager. Merchants use their Shopify account to approve store permissions in the browser. Never put a gateway API key or Shopify client secret in browser code.
+
+| Account or credential | Authority and storage |
+| --- | --- |
+| Host operator | Runs migrations and administration for all tenants; Docker access is administrative access. |
+| SaaS service account | A tenant API key authorizes all supported API actions for that tenant. There are no per-key read/write roles or expiry settings. Use separate tenants for independently administered clients. |
+| API and worker processes | Run as the container's `node` user and share the Compose `gateway` PostgreSQL account. This release does not provision separate database roles per process or tenant. |
+| Merchant Shopify account | Must have permission to install/approve the app on that store; approval grants only the app's requested Shopify scopes. |
+| `MASTER_KEY` and PostgreSQL password | Plaintext in owner-only `.env`; required with the database backup. |
+| Gateway API keys | Raw value in the operator's owner-only secret file and the client's secret manager; PostgreSQL stores a SHA-256 hash. |
+| Shopify app secret and merchant access/refresh tokens | Encrypted in PostgreSQL with `MASTER_KEY`; clients receive connection IDs rather than these credentials. |
+
+The installer has already provisioned the default tenant in `.env` and its key in `.secrets/bootstrap-api-key`. To provision a separate SaaS client, this block generates a UUID and a cryptographically random key without printing the key. Change `acme` and `Acme SaaS` for each client. It refuses to overwrite an existing secret file. These examples require Compose's `run --env-from-file` option (`docker compose run --help` lists it).
+
+```bash
+bash <<'BASH'
+set -Eeuo pipefail
+umask 077
+mkdir -p .secrets/tenants
+chmod 700 .secrets/tenants
+tenant_file=.secrets/tenants/acme.env
+test ! -e "$tenant_file" || { printf '%s\n' 'Tenant file already exists; reuse it instead of generating a new identity.' >&2; exit 1; }
+tenant_id=$(docker compose run --rm --no-deps -T api node --input-type=module -e 'import { randomUUID } from "node:crypto"; process.stdout.write(randomUUID())')
+api_key=$(openssl rand -hex 32)
+printf 'TENANT_ID=%s\nAPI_KEY=%s\nTENANT_NAME=Acme SaaS\n' "$tenant_id" "$api_key" > "$tenant_file"
+unset api_key
+docker compose run --rm --no-deps -T --env-from-file "$tenant_file" api node dist/admin.js bootstrap
+BASH
+```
+
+If provisioning fails after the file is written, retry only the final `docker compose run ... bootstrap` command with that file. It is idempotent for the same tenant/key. Securely transfer its `API_KEY` value to the client's secret manager; never send `.env` or `MASTER_KEY` to a client. Include `.secrets/tenants` in your encrypted off-host secret backup: `release/backup.sh` currently copies only the installer's bootstrap key, so these additional client key files need separate backup. A lost raw client key cannot be recovered from its database hash.
+
+## Configure the client's Shopify app
+
+Create or select the intended Shopify app in the [Shopify Dev Dashboard](https://dev.shopify.com/dashboard). Use the app's client ID and client secret, not a store Admin API access token. Configure its exact OAuth redirect URL as `https://gateway.example.com/oauth/shopify/callback`, replacing the origin with this installation's `PUBLIC_BASE_URL`. Set the matching product permission to `write_products`. The gateway's `SHOPIFY_SCOPES` must match the scopes approved for the app; adding a scope requires merchant authorization again.
+
+This block prompts for credentials without echoing the secret or placing its value in command history. It configures the `acme` tenant created above; for the default tenant, read `TENANT_ID` from `.env` instead. Set `SHOPIFY_RETURN_URLS` to your client's exact HTTPS completion URL, or leave it empty to return the gateway's completion JSON.
+
+```bash
+export TENANT_ID=$(sed -n 's/^TENANT_ID=//p' .secrets/tenants/acme.env)
+read -r -p 'Shopify client ID: ' SHOPIFY_CLIENT_ID
+read -r -s -p 'Shopify client secret: ' SHOPIFY_CLIENT_SECRET; printf '\n'
+export SHOPIFY_CLIENT_ID SHOPIFY_CLIENT_SECRET
+export SHOPIFY_SCOPES=write_products
+export SHOPIFY_RETURN_URLS=https://app.example.com/integrations/shopify/complete
+docker compose run --rm --no-deps -T -e TENANT_ID -e SHOPIFY_CLIENT_ID \
+  -e SHOPIFY_CLIENT_SECRET -e SHOPIFY_SCOPES -e SHOPIFY_RETURN_URLS \
+  api node dist/admin.js configure-shopify
+unset SHOPIFY_CLIENT_ID SHOPIFY_CLIENT_SECRET SHOPIFY_SCOPES SHOPIFY_RETURN_URLS TENANT_ID
+```
+
+The app secret is encrypted in `shopify_apps`; the raw value is not written to a host credential file by this command. Rerun it to update the same app's credentials. Changing the app client ID while its tenant has active store connections is rejected; revoke/reconnect those stores before changing app identity. Keep the same app identity for a connected store and do not treat two tenants as interchangeable merchant identities.
+
+The client's backend then calls `POST /v1/shopify/connect` with its tenant bearer key and a `shop` such as `example-store.myshopify.com`. Send the merchant's browser to the returned `browserStartUrl` within 120 seconds; it is single use. The callback is public but validates Shopify's signature, state, and browser binding. See the [request examples](../README.md#merchant-authorization) for the connect/read/write flow.
+
 ## Health and diagnostics
 
 ```bash

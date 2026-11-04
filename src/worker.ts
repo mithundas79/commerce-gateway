@@ -37,6 +37,8 @@ export interface WorkerOptions {
   now?: () => number;
   /** Invoked by startWorker after a successful DB-backed poll, including an empty queue. */
   onHealthy?: () => Promise<void> | void;
+  /** Invoked after failed DB-backed polls so a runtime can withdraw its shared heartbeat. */
+  onUnhealthy?: () => Promise<void> | void;
 }
 
 type SafeError = { code: string; retryable?: boolean; ambiguous?: boolean; retryAfterMs?: number };
@@ -236,6 +238,7 @@ export async function startWorker(options: WorkerOptions & { signal: AbortSignal
       await options.onHealthy?.();
     } catch {
       // DB outages leave durable rows available for lease reclamation. Avoid an outage busy-loop.
+      try { await options.onUnhealthy?.(); } catch { /* Heartbeat removal must not stop lease recovery. */ }
     }
     if (!worked && !options.signal.aborted) {
       await new Promise<void>(resolve => {

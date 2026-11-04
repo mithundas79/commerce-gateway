@@ -104,12 +104,25 @@ export async function main(env = process.env): Promise<void> {
     } else {
       const heartbeat = '/tmp/worker-heartbeat';
       await rm(heartbeat,{ force:true });
+      let workerHealthy = false;
+      let notificationsHealthy = false;
+      let heartbeatUpdate = Promise.resolve();
+      const publishHeartbeat = () => {
+        heartbeatUpdate = heartbeatUpdate.catch(() => {}).then(() => workerHealthy && notificationsHealthy
+          ? writeFile(heartbeat,String(Date.now()),{ mode:0o600 })
+          : rm(heartbeat,{ force:true }));
+        return heartbeatUpdate;
+      };
       try {
         await Promise.all([
-          startWorker({ pool,provider,signal:stop.signal,onHealthy:() => writeFile(heartbeat,String(Date.now()),{ mode:0o600 }) }),
-          startNotifications({ pool,signal:stop.signal,decryptSecret:(ciphertext,tenant) => decryptSecret(ciphertext,master,`notification:${tenant}`) }),
+          startWorker({ pool,provider,signal:stop.signal,
+            onHealthy:() => {workerHealthy=true; return publishHeartbeat();},
+            onUnhealthy:() => {workerHealthy=false; return publishHeartbeat();} }),
+          startNotifications({ pool,signal:stop.signal,decryptSecret:(ciphertext,tenant) => decryptSecret(ciphertext,master,`notification:${tenant}`),
+            onHealthy:() => {notificationsHealthy=true; return publishHeartbeat();},
+            onUnhealthy:() => {notificationsHealthy=false; return publishHeartbeat();} }),
         ]);
-      } finally { stop.abort(); await rm(heartbeat,{ force:true }); }
+      } finally { stop.abort(); await heartbeatUpdate.catch(() => {}); await rm(heartbeat,{ force:true }); }
     }
   } finally {
     process.removeListener('SIGTERM',shutdown); process.removeListener('SIGINT',shutdown);

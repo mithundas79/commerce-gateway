@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
-import { bootstrap, migrate } from '../../src/admin.js';
+import { bootstrap, migrate, revokeApiKey } from '../../src/admin.js';
 import { PostgresStore } from '../../src/store.js';
 import { ShopifyOAuth } from '../../src/oauth.js';
 import { createRuntime } from '../../src/main.js';
@@ -109,5 +109,9 @@ test('real PostgreSQL browser start and HMAC callback enforce cookie binding and
     await f.pool.query('UPDATE connections SET revoked_at=now() WHERE id=$1',[connection.id]);
     await assert.rejects(provider.updateProductTitle({...context,title:'Must not dispatch'}),/not authorized/);
     assert.equal(writes,1);
+    await revokeApiKey(f.pool,{TENANT_ID:f.tenant,API_KEY:f.key});
+    const revokedKey = await app.inject({method:'GET',url:'/v1/connections',headers:{authorization:`Bearer ${f.key}`}});
+    assert.equal(revokedKey.statusCode,401);
+    await assert.rejects(bootstrap(f.pool,{TENANT_ID:f.tenant,API_KEY:f.key}),/revoked/);
   } finally {globalThis.fetch=originalFetch; await app.close(); await f.close();}
 });

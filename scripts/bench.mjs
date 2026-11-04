@@ -96,7 +96,10 @@ export async function benchmark(env = process.env) {
       [connectionId, tenantId, 'benchmark.myshopify.com', 'benchmark-unused-no-provider-calls', ['read_products', 'write_products']]);
     const postgres = (await pool.query('SHOW server_version')).rows[0].server_version;
     const synchronousCommit = (await pool.query('SHOW synchronous_commit')).rows[0].synchronous_commit;
-    if (synchronousCommit === 'off') throw new Error('Benchmark requires synchronous_commit enabled for durable enqueue');
+    const fsync = (await pool.query('SHOW fsync')).rows[0].fsync;
+    if (synchronousCommit === 'off' || fsync !== 'on') {
+      throw new Error('Benchmark requires synchronous_commit and fsync enabled for durable enqueue');
+    }
     const products = Array.from({ length: 25 }, (_, index) => ({
       id: `gid://shopify/Product/${index + 1}`, title: `Benchmark product ${index + 1}`,
       updatedAt: '2026-01-01T00:00:00Z',
@@ -178,10 +181,11 @@ export async function benchmark(env = process.env) {
       measurement: 'Loopback TCP HTTP response including auth, validation, PostgreSQL and JSON; excludes Shopify network/worker completion. Closed-loop clients; no open-loop saturation claim.',
       runtime: { node: process.version, v8: process.versions.v8, platform: process.platform,
         architecture: process.arch, osRelease: os.release(), cpu: os.cpus()[0]?.model,
-        logicalCpus: os.cpus().length, totalMemoryBytes: os.totalmem(), postgres, synchronousCommit },
+        logicalCpus: os.cpus().length, totalMemoryBytes: os.totalmem(), postgres, synchronousCommit, fsync },
       config: { requestsPerWorkload: requests, concurrency, warmupPerWorkload: warmup,
         pgPoolSize, replayKeys, timeoutMs, p95ThresholdMs, percentileMethod: 'nearest-rank' },
       workloads: results,
+      errors: results.reduce((sum, result) => sum + result.errors, 0),
       durability: { expectedOperationRows: expectedRows, actualOperationRows: actualRows, passed: durableRowsPassed },
       passed: durableRowsPassed && results.every(result => result.passed),
     };

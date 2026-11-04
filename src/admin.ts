@@ -9,6 +9,7 @@ import { configureNotificationEndpoint, disableNotificationEndpoint } from './no
 export const help = `Commerce Gateway administration
   migrate                 Apply checksummed SQL migrations (DATABASE_URL)
   bootstrap               Create tenant and scoped API key (TENANT_ID, API_KEY; optional TENANT_NAME)
+  revoke-api-key          Revoke a tenant API key (TENANT_ID, API_KEY); repeat bootstrap with a new key to rotate
   configure-shopify       Store encrypted app credentials for TENANT_ID
                           SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET, SHOPIFY_SCOPES (comma-separated)
                           optional SHOPIFY_RETURN_URLS (comma-separated), PUBLIC_BASE_URL, MASTER_KEY
@@ -81,14 +82,22 @@ export async function bootstrap(pool: Pool, env: NodeJS.ProcessEnv): Promise<voi
   finally { client.release(); }
 }
 
+export async function revokeApiKey(pool: Pool, env: NodeJS.ProcessEnv): Promise<void> {
+  const tenant = tenantId(env);
+  const hash = createHash('sha256').update(required(env,'API_KEY')).digest('hex');
+  const result = await pool.query('UPDATE api_keys SET revoked_at=COALESCE(revoked_at,now()) WHERE tenant_id=$1 AND token_hash=$2 RETURNING id', [tenant,hash]);
+  if (!result.rows[0]) throw new Error('API key was not found for this tenant');
+}
+
 export async function runAdmin(args: string[], env = process.env): Promise<void> {
   if (args.length === 0 || args.length === 1 && ['--help','-h','help'].includes(args[0]!)) { console.log(help); return; }
-  if (args.length !== 1 || !['migrate','bootstrap','configure-shopify','configure-notification','disable-notification'].includes(args[0]!)) throw new Error('Unknown command; use --help');
+  if (args.length !== 1 || !['migrate','bootstrap','revoke-api-key','configure-shopify','configure-notification','disable-notification'].includes(args[0]!)) throw new Error('Unknown command; use --help');
   const pool = new Pool({ connectionString: required(env,'DATABASE_URL'), connectionTimeoutMillis: 10_000 });
   try {
     switch (args[0]) {
       case 'migrate': await migrate(pool); break;
       case 'bootstrap': await bootstrap(pool,env); break;
+      case 'revoke-api-key': await revokeApiKey(pool,env); break;
       case 'configure-shopify': {
         const master = required(env,'MASTER_KEY'); validateMasterKey(master);
         const scopes = required(env,'SHOPIFY_SCOPES').split(',').map(s => s.trim());
@@ -104,7 +113,7 @@ export async function runAdmin(args: string[], env = process.env): Promise<void>
       }
       case 'configure-notification': {
         const tenant = tenantId(env); const secret = required(env,'NOTIFICATION_SECRET');
-        if (Buffer.byteLength(secret) < 32) throw new Error('NOTIFICATION_SECRET must contain at least 32 bytes');
+        if (Buffer.byteLength(secret) < 32 || Buffer.byteLength(secret) > 4096) throw new Error('NOTIFICATION_SECRET must contain 32-4096 bytes');
         await configureNotificationEndpoint(pool, { tenantId: tenant, url: required(env,'NOTIFICATION_URL'), secretCiphertext: encryptSecret(secret,required(env,'MASTER_KEY'),`notification:${tenant}`) });
         break;
       }
