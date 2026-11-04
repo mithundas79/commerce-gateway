@@ -10,6 +10,7 @@ const output = resolve('benchmark-comparison-output');
 await mkdir(output, { recursive: true });
 const pool = new Pool({ connectionString: databaseUrl, max: 1 });
 const results = [];
+const benchmarkEntry = resolve(process.env.DIAGNOSTIC_BENCH_ENTRY ?? 'scripts/bench.mjs');
 
 async function snapshot() {
   await pool.query('SELECT pg_stat_clear_snapshot()');
@@ -17,7 +18,7 @@ async function snapshot() {
     current_setting('track_wal_io_timing') AS wal_timing,
     (SELECT row_to_json(w) FROM pg_stat_wal w) AS wal,
     (SELECT json_agg(i ORDER BY backend_type,context) FROM pg_stat_io i WHERE object='wal') AS wal_io,
-    (SELECT json_agg(s ORDER BY name) FROM pg_stat_slru s WHERE name LIKE 'MultiXact%') AS multixact,
+    (SELECT json_agg(s ORDER BY name) FROM pg_stat_slru s WHERE name LIKE 'MultiXact%' OR name LIKE 'multixact%') AS multixact,
     (SELECT row_to_json(d) FROM pg_stat_database d WHERE datname=current_database()) AS database`)).rows[0];
 }
 
@@ -35,10 +36,11 @@ function walIoDeltas(before, after) {
   }));
 }
 
-function benchmark(directory, prefix) {
+function benchmark(directory, prefix, sourceSha) {
   return new Promise((resolveRun, reject) => {
-    // Execute the unchanged benchmark in a fresh process, with its default gates and durability settings.
-    const child = spawn(process.execPath, ['scripts/bench.mjs'], { cwd: directory, env: process.env,
+    // Use one pinned telemetry entry with the selected runtime module in each fresh process.
+    const child = spawn(process.execPath, [benchmarkEntry], { cwd: directory,
+      env: { ...process.env, BENCH_API_MODULE: resolve(directory, 'dist/api.js'), BENCH_SOURCE_SHA: sourceSha },
       stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
@@ -49,7 +51,10 @@ function benchmark(directory, prefix) {
       try {
         await writeFile(`${prefix}.stdout.json`, stdout);
         await writeFile(`${prefix}.stderr.txt`, stderr);
-        resolveRun({ exitCode, signal, report: stdout ? JSON.parse(stdout) : null });
+        let report = null;
+        try { report = stdout ? JSON.parse(stdout) : null; }
+        catch { /* Keep malformed output and continue collecting the other paired runs. */ }
+        resolveRun({ exitCode, signal, report });
       } catch (error) { reject(error); }
     });
   });
@@ -58,6 +63,10 @@ function benchmark(directory, prefix) {
 try {
   const sourceFiles = ['scripts/bench.mjs', 'src/api.ts', 'package-lock.json'];
   const sourceHashes = [];
+  const telemetryHashes = [];
+  for (const path of ['scripts/bench.mjs', 'scripts/bench-diagnostics.mjs']) {
+    telemetryHashes.push({ path, sha256: createHash('sha256').update(await readFile(resolve('.bench/telemetry', path))).digest('hex') });
+  }
   for (const path of sourceFiles) {
     const hashes = {};
     for (const variant of ['baseline', 'candidate']) {
@@ -70,12 +79,13 @@ try {
     const before = await snapshot();
     if (before.wal_timing !== 'on') throw new Error('Disposable PostgreSQL WAL timing must be enabled');
     const prefix = resolve(output, `${index + 1}-${variant}`);
-    const run = await benchmark(resolve('.bench', variant), prefix);
+    const sourceSha = process.env[`${variant.toUpperCase()}_SHA`];
+    const run = await benchmark(resolve('.bench', variant), prefix, sourceSha);
     // All benchmark connections have closed, flushing their cumulative statistics before this snapshot.
     const after = await snapshot();
     const walBytes = Number((await pool.query('SELECT pg_wal_lsn_diff($1::pg_lsn,$2::pg_lsn) AS bytes',
       [after.lsn, before.lsn])).rows[0].bytes);
-    const result = { position: index + 1, variant, sha: process.env[`${variant.toUpperCase()}_SHA`], ...run,
+    const result = { position: index + 1, variant, sha: sourceSha, telemetrySha: process.env.TELEMETRY_SHA, ...run,
       postgres: { scope: 'Whole benchmark invocation, including schema creation, warmup and cleanup. Cluster-wide counters may include background activity.',
         before, after, walBytes,
         walDelta: counterDeltas(before.wal, after.wal, ['wal_records', 'wal_fpi', 'wal_bytes', 'wal_buffers_full']),
@@ -91,11 +101,11 @@ try {
   }
   const lines = ['# Same-runner enqueue comparison', '',
     'Existing benchmark, default 100 ms p95 gate, synchronous commit and fsync retained. Order is baseline/candidate, then candidate/baseline.', '',
-    '| Position | Variant | Workload | p95 ms | Errors | Passed |',
-    '| --- | --- | --- | ---: | ---: | --- |'];
+    '| Position | Variant | Workload | p50 ms | p95 ms | p99 ms | Errors | Passed |',
+    '| --- | --- | --- | ---: | ---: | ---: | ---: | --- |'];
   for (const result of results) {
     for (const workload of result.report?.workloads ?? []) {
-      lines.push(`| ${result.position} | ${result.variant} | ${workload.name} | ${workload.p95Ms} | ${workload.errors} | ${workload.passed} |`);
+      lines.push(`| ${result.position} | ${result.variant} | ${workload.name} | ${workload.p50Ms} | ${workload.p95Ms} | ${workload.p99Ms} | ${workload.errors} | ${workload.passed} |`);
     }
   }
   lines.push('', '| Position | Variant | Exit | Durable rows passed | WAL bytes | WAL writes | WAL fsyncs | WAL write ms | WAL fsync ms |',
@@ -107,9 +117,20 @@ try {
   lines.push('', 'WAL I/O covers each complete invocation, including setup, warmup and teardown. Counters are cluster-wide, and cumulative statistics can lag background activity. Raw snapshots and MultiXact deltas are included in artifacts.', '',
     '| Source | Baseline/candidate identical |', '| --- | --- |');
   for (const source of sourceHashes) lines.push(`| ${source.path} | ${source.identical} |`);
+  lines.push('', '| Position | Variant | Unique enqueue WAL fsyncs | WAL fsync ms | Advisory observations | WalSync observations |',
+    '| --- | --- | ---: | ---: | ---: | ---: |');
+  for (const result of results) {
+    const diagnostic = result.report?.workloads.find(workload => workload.name==='durable_unique_enqueue')?.diagnostics;
+    const before = diagnostic?.before.io.find(row => row.backend_type==='client backend' && row.object==='wal' && row.context==='normal');
+    const after = diagnostic?.after.io.find(row => row.backend_type==='client backend' && row.object==='wal' && row.context==='normal');
+    const observed = event => diagnostic?.waitObservations.filter(row => row.waitEvent===event).reduce((sum,row) => sum+row.backends,0) ?? 0;
+    lines.push(`| ${result.position} | ${result.variant} | ${before && after ? after.fsyncs-before.fsyncs : 'unavailable'} | ${before && after ? (after.fsync_time-before.fsync_time).toFixed(3) : 'unavailable'} | ${observed('advisory')} | ${observed('WalSync')} |`);
+  }
+  lines.push('', 'Targeted figures cover only the unique enqueue workload using the same pinned telemetry on both runtimes. These counters are cluster-wide and include observer/background activity. Wait observations count sampled backends, not elapsed wait time.',
+    '', `Telemetry commit ${process.env.TELEMETRY_SHA}. Baseline ${process.env.BASELINE_SHA}. Candidate ${process.env.CANDIDATE_SHA}.`);
   const summary = `${lines.join('\n')}\n`;
   await writeFile(resolve(output, 'summary.md'), summary);
-  await writeFile(resolve(output, 'comparison.json'), `${JSON.stringify({ sourceHashes, results }, null, 2)}\n`);
+  await writeFile(resolve(output, 'comparison.json'), `${JSON.stringify({ telemetrySha: process.env.TELEMETRY_SHA, benchmarkEntry, telemetryHashes, sourceHashes, results }, null, 2)}\n`);
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, summary);
   console.log(summary);
   if (results.some(result => result.exitCode !== 0 || !result.report?.passed)) process.exitCode = 1;

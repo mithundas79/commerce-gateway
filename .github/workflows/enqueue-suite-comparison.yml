@@ -1,8 +1,6 @@
 name: Temporary enqueue comparison around integration suite
 
 on:
-  push:
-    branches: [diagnostics/enqueue-comparison]
   workflow_dispatch:
 
 permissions:

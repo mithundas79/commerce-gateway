@@ -27,13 +27,19 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      BASELINE_SHA: 85afbf5487a573f681fa9bdefceff4ce491b4803
-      CANDIDATE_SHA: 08435c5ce38bc6e12cea4b2087b3c5c560298c56
+      BASELINE_SHA: fce4bc9e2c68de2348f73739c7fdaad0078b490b
+      CANDIDATE_SHA: bf9bf27cc60ecb104ecb626cc681e1fcbd612760
+      TELEMETRY_SHA: 7f59bb3dbc0bd972088cc48d453fe8b34d54e6b8
       BENCH_DATABASE_URL: postgres://gateway:ci-local-password@localhost:5432/gateway_test
       NODE_ENV: test
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          ref: 7f59bb3dbc0bd972088cc48d453fe8b34d54e6b8
+          path: .bench/telemetry
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
@@ -44,7 +50,9 @@ jobs:
         run: |
           git worktree add --detach .bench/baseline "$BASELINE_SHA"
           git worktree add --detach .bench/candidate "$CANDIDATE_SHA"
-          for variant in baseline candidate; do
+          git -C .bench/telemetry diff --exit-code "$BASELINE_SHA" -- src migrations tests package.json package-lock.json tsconfig.json tsconfig.test.json
+          git -C .bench/candidate diff --exit-code "$BASELINE_SHA" -- migrations package.json package-lock.json tsconfig.json tsconfig.test.json
+          for variant in baseline candidate telemetry; do
             npm ci --prefix ".bench/$variant"
             npm run build --prefix ".bench/$variant"
           done
@@ -55,6 +63,9 @@ jobs:
           docker exec "$POSTGRES_CONTAINER" psql -U gateway -d gateway_test -c "ALTER SYSTEM SET track_wal_io_timing=on"
           docker exec "$POSTGRES_CONTAINER" psql -U gateway -d gateway_test -c "SELECT pg_reload_conf()"
       - name: Compare baseline and candidate in both orders
+        env:
+          DIAGNOSTIC_BENCH_ENTRY: .bench/telemetry/scripts/bench.mjs
+          BENCH_DIAGNOSTICS: '1'
         run: node scripts/compare-enqueue.mjs
       - name: Publish complete diagnostic evidence
         if: always()
