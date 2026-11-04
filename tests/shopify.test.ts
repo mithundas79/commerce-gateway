@@ -18,13 +18,14 @@ test('product list sends latest pinned GraphQL version and supports bounded pagi
   const calls: any[] = [];
   const api = new ShopifyConnector({ fetch: async (url, init) => {
     calls.push({ url, init });
-    return response({ data: { products: { nodes: [item], pageInfo: { hasNextPage: true, endCursor: 'cursor' } } } });
+    return response({ data: { products: { nodes: [{ ...item, status: 'DRAFT' }], pageInfo: { hasNextPage: true, endCursor: 'cursor' } } } });
   } });
   const result = await api.listProducts({ ...credentials, first: 10, after: 'previous' });
-  assert.deepEqual(result, { products: [item], pageInfo: { hasNextPage: true, endCursor: 'cursor' } });
+  assert.deepEqual(result, { products: [{ ...item, status: 'DRAFT' }], pageInfo: { hasNextPage: true, endCursor: 'cursor' } });
   assert.equal(calls[0].url, 'https://demo.myshopify.com/admin/api/2026-10/graphql.json');
   assert.equal(calls[0].init.headers['X-Shopify-Access-Token'], credentials.accessToken);
   assert.equal(calls[0].init.redirect, 'error');
+  assert.match(JSON.parse(calls[0].init.body).query, /nodes \{ id title updatedAt status \}/);
   assert.deepEqual(JSON.parse(calls[0].init.body).variables, { first: 10, after: 'previous' });
   await assert.rejects(api.listProducts({ ...credentials, first: 251 }), error('VALIDATION'));
   assert.equal(calls.length, 1);
@@ -104,4 +105,13 @@ test('external cancellation and timeout abort in-flight request', async () => {
   await assert.rejects(api.updateProductTitle({ ...credentials, productId: item.id, title: item.title }), error('AMBIGUOUS_WRITE', true));
   const controller = new AbortController(); controller.abort();
   await assert.rejects(api.listProducts({ ...credentials, signal: controller.signal }), error('TRANSIENT', false, true));
+});
+
+test('catalog reads reject missing and malformed product statuses', async () => {
+  for (const status of [undefined, null, 1, '']) {
+    const api = new ShopifyConnector({ fetch: async () => response({ data: { products: {
+      nodes: [{ ...item, status }], pageInfo: { hasNextPage: false, endCursor: null },
+    } } }) });
+    await assert.rejects(api.listProducts(credentials), error('TRANSIENT', false, true));
+  }
 });

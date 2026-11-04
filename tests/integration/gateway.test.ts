@@ -84,7 +84,7 @@ beforeEach(async () => {
     assert.equal(String(url), 'https://qa-a.myshopify.com/admin/api/2026-10/graphql.json');
     assert.equal(JSON.parse(String(init?.body)).variables.first, 3);
     return new Response(JSON.stringify({ data: { products: {
-      nodes: [{ id: productId, title: 'Fixture', updatedAt: '2026-01-01T00:00:00Z' }],
+      nodes: [{ id: productId, title: 'Fixture', status: 'DRAFT', updatedAt: '2026-01-01T00:00:00Z' }],
       pageInfo: { hasNextPage: false, endCursor: null },
     } } }), { headers: { 'x-shopify-api-version': '2026-10' } });
   } });

@@ -178,6 +178,26 @@ test('a concurrent reinstall supersedes an old provider proof and a later identi
   } finally {release?.();globalThis.fetch=original;await f.close();}
 });
 
+test('a held worker cannot acquire reinstalled credentials and dispatch a superseded operation',async () => {
+  const f=await fixture();const original=globalThis.fetch;let requests=0;
+  globalThis.fetch=async () => {requests++;throw new Error('Superseded work must not reach Shopify');};
+  try {
+    const id=await f.operation();
+    const accessToken=f.runtime.oauth.accessToken.bind(f.runtime.oauth);
+    f.runtime.oauth.accessToken=async (tenant,domain) => {
+      const body=Buffer.from(JSON.stringify({id:123,myshopify_domain:shop}));
+      await f.runtime.lifecycle.receive(config.clientId,'app-uninstalled',{shopId:'123',shop},body,webhookBinding(config,'app-uninstalled'),createHmac('sha256',config.clientSecret).update(body).digest('base64'),shop);
+      await f.install();
+      return accessToken(tenant,domain);
+    };
+    assert.equal(await runWorkerOnce({pool:f.pool,provider:f.runtime.provider}),true);
+    assert.equal(requests,0);
+    const operation=(await f.pool.query('SELECT status,error FROM operations WHERE id=$1',[id])).rows[0];
+    assert.equal(operation.status,'uncertain');assert.equal(operation.error.code,'SHOPIFY_AUTHORIZATION_CHANGED');
+    assert.equal((await f.pool.query('SELECT revoked_at FROM connections')).rows[0].revoked_at,null);
+  } finally {globalThis.fetch=original;await f.close();}
+});
+
 test('a different tenant using the same public app ID and its own secret cannot forge another owner lifecycle event',async () => {
   const f=await fixture();const original=globalThis.fetch;let requests=0;
   globalThis.fetch=async () => {requests++;return new Response('{}',{status:401});};
