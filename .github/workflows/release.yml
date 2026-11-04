@@ -1,0 +1,63 @@
+name: Portable release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26.13.0'
+      - uses: docker/setup-buildx-action@v3
+      - name: Validate shell scripts
+        run: bash -n release/*.sh
+      - name: Build prebuilt application and database bundle
+        run: bash release/build-bundle.sh 'linux/${{ matrix.arch }}' '${{ github.sha }}'
+      - name: Install, reinstall, back up, and restore the prebuilt bundle
+        env:
+          CI: 'true'
+        run: bash release/smoke-install.sh 'release-artifacts/commerce-gateway-${{ github.sha }}-linux-${{ matrix.arch }}.tar.gz'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: commerce-gateway-linux-${{ matrix.arch }}
+          path: release-artifacts/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: bundle
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: commerce-gateway-linux-*
+          path: release-artifacts
+          merge-multiple: true
+      - name: Publish tested bundles only for a release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" release-artifacts/* --verify-tag --generate-notes --title "$RELEASE_TAG"

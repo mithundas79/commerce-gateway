@@ -1,0 +1,75 @@
+name: commerce-gateway
+
+x-app: &app
+  image: commerce-gateway:local
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=16m,mode=1777
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 30s
+  environment: &environment
+    NODE_ENV: production
+    DATABASE_URL: postgres://gateway:${POSTGRES_PASSWORD:?Run release/install.sh}@db:5432/gateway
+    MASTER_KEY: ${MASTER_KEY:?Run release/install.sh}
+    PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set HTTPS public origin}
+    PORT: "3000"
+  networks: [database, outbound]
+  depends_on:
+    db:
+      condition: service_healthy
+
+services:
+  db:
+    image: postgres:18.6-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_DB: gateway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run release/install.sh}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    networks: [database]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    security_opt: [no-new-privileges:true]
+
+  api:
+    <<: *app
+    environment:
+      <<: *environment
+      ROLE: api
+    ports:
+      - "127.0.0.1:${HOST_PORT:-3000}:3000"
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  worker:
+    <<: *app
+    environment:
+      <<: *environment
+      ROLE: worker
+    healthcheck:
+      test: [CMD, node, -e, "const fs=require('node:fs');try{if(Date.now()-fs.statSync('/tmp/worker-heartbeat').mtimeMs>120000)process.exit(1)}catch{process.exit(1)}"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  postgres-data:
+
+networks:
+  database:
+    internal: true
+  outbound:

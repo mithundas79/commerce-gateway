@@ -1,0 +1,75 @@
+name: Resolve and qualify dependency lock
+
+on:
+  push:
+    branches: [feature/shopify-gateway]
+    paths: [package.json, .github/workflows/lock.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-lock-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    if: github.repository == 'mithundas79/commerce-gateway' && github.ref == 'refs/heads/feature/shopify-gateway'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    services:
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_DB: gateway_test
+          POSTGRES_USER: gateway
+          POSTGRES_PASSWORD: ci-local-password
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U gateway -d gateway_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://gateway:ci-local-password@localhost:5432/gateway_test
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - name: Resolve full dependency lock when absent
+        id: lock
+        shell: bash
+        run: |
+          if test -f package-lock.json; then
+            echo 'created=false' >> "$GITHUB_OUTPUT"
+          else
+            npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+            echo 'created=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: resolved-package-lock
+          path: package-lock.json
+          if-no-files-found: error
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run test:integration
+      - run: node scripts/verify-package.mjs
+      - run: docker build --tag commerce-gateway:lock-qualification .
+      - name: Commit only the qualified lock to the existing feature branch
+        if: steps.lock.outputs.created == 'true'
+        shell: bash
+        run: |
+          test "$(git branch --show-current)" = '' || test "$(git branch --show-current)" = 'feature/shopify-gateway'
+          git diff --exit-code -- package.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- package-lock.json
+          test "$(git diff --cached --name-only)" = 'package-lock.json'
+          git commit -m 'build: lock qualified dependency versions'
+          git push origin HEAD:refs/heads/feature/shopify-gateway
