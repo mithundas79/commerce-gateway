@@ -5,6 +5,22 @@ import { decryptSecret, encryptSecret, validateMasterKey } from './crypto.js';
 import { hashOAuthValue, lifecycleTopics, webhookBinding, type LifecycleTopic, type OfflineTokens, type OAuthState, type OAuthStateStore, type OAuthTokenStore, type ShopifyAppConfig } from './oauth.js';
 import { ConnectorError } from './shopify.js';
 
+/** Stable identity must agree with the original app/domain owner before any mutation. */
+export async function assertShopIdentityOwner(db: Pick<Pool,'query'>, clientId: string, shopId: string,
+  tenantId: string, shop: string, allowUnregistered = false): Promise<void> {
+  const owner = (await db.query(
+    `SELECT i.tenant_id,i.shop,(o.tenant_id IS NOT NULL) AS domain_matches FROM shopify_shop_id_owners i
+      LEFT JOIN shopify_shop_owners o ON o.client_id=i.client_id AND o.shop=i.shop AND o.tenant_id=i.tenant_id
+      WHERE i.client_id=$1 AND i.shop_id=$2 FOR KEY SHARE OF i`,
+    [clientId,shopId],
+  )).rows[0];
+  if (!owner && allowUnregistered) return;
+  if (!owner?.domain_matches || owner.tenant_id !== tenantId || owner.shop !== shop) {
+    throw new ConnectorError('IDENTITY_RECONCILIATION_REQUIRED',
+      'Shop identity requires operator reconciliation; automatic domain changes and ownership transfers are unsupported',409);
+  }
+}
+
 /** Bounded maintenance uses database time and never touches operation/idempotency history. */
 export async function cleanupExpiredOAuth(pool: Pick<Pool,'query'>, batchSize = 1000): Promise<{states:number;browserStarts:number}> {
   if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 10_000) throw new Error('OAuth cleanup batch must contain 1-10000 rows');
@@ -91,6 +107,22 @@ export class PostgresStore implements OAuthStateStore, OAuthTokenStore {
       await this.db.query(`INSERT INTO shopify_shop_owners (client_id,shop,tenant_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [app.clientId,shop,tenantId]);
       const owner = (await this.db.query('SELECT tenant_id FROM shopify_shop_owners WHERE client_id=$1 AND shop=$2', [app.clientId,shop])).rows[0];
       if (owner?.tenant_id !== tenantId) throw new Error('Shopify shop authorization belongs to another tenant');
+      const existing = (await this.db.query(
+        'SELECT shopify_shop_id FROM connections WHERE tenant_id=$1 AND shop=$2',[tenantId,shop],
+      )).rows[0];
+      const shopId = tokens.shopId ?? existing?.shopify_shop_id ?? undefined;
+      if (shopId !== undefined) {
+        if (typeof shopId !== 'string' || !/^[1-9][0-9]{0,19}$/.test(shopId) || (existing?.shopify_shop_id && existing.shopify_shop_id !== shopId)) {
+          throw new ConnectorError('IDENTITY_RECONCILIATION_REQUIRED','Shop identity changed; operator reconciliation is required',409);
+        }
+        // Different tenant/domain locks converge on this stable identity in the transaction.
+        await this.db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',
+          [JSON.stringify(['shopify-id-owner',app.clientId,shopId])]);
+        await this.db.query(`INSERT INTO shopify_shop_id_owners(client_id,shop_id,tenant_id,shop)
+          VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`,[app.clientId,shopId,tenantId,shop]);
+        await assertShopIdentityOwner(this.db,app.clientId,shopId,tenantId,shop);
+      }
+      const stableTokens = shopId !== undefined ? {...tokens,shopId} : tokens;
       // Serialize enqueue snapshots with authorization replacement before fencing held work.
       if (tokens.authorizationId) await this.db.query('SELECT id FROM connections WHERE tenant_id=$1 AND shop=$2 FOR UPDATE',[tenantId,shop]);
       if (tokens.authorizationId) await this.db.query(`UPDATE operations SET
@@ -105,7 +137,7 @@ export class PostgresStore implements OAuthStateStore, OAuthTokenStore {
         scopes=EXCLUDED.scopes, revoked_at=NULL, shopify_shop_id=COALESCE(EXCLUDED.shopify_shop_id,connections.shopify_shop_id),
         authorization_generation=COALESCE($7::uuid,connections.authorization_generation),
         lifecycle_hold=CASE WHEN $7::uuid IS NOT NULL AND connections.authorization_generation<>$7::uuid THEN false ELSE connections.lifecycle_hold END, updated_at=now()`,
-      [randomUUID(),tenantId,shop,encryptSecret(JSON.stringify(tokens),this.masterKey,`token:${tenantId}:${shop}`),tokens.scopes,tokens.shopId ?? null,tokens.authorizationId ?? null]);
+      [randomUUID(),tenantId,shop,encryptSecret(JSON.stringify(stableTokens),this.masterKey,`token:${tenantId}:${shop}`),tokens.scopes,shopId ?? null,tokens.authorizationId ?? null]);
       if (tokens.authorizationId) await this.db.query(`UPDATE shopify_lifecycle_events SET status='ignored',updated_at=clock_timestamp()
         WHERE tenant_id=$1 AND shop=$2 AND generation<>$3 AND status IN ('pending','action_required')`,[tenantId,shop,tokens.authorizationId]);
       await this.db.query('COMMIT');

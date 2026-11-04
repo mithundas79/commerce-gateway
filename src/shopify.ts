@@ -1,6 +1,6 @@
 export const SHOPIFY_API_VERSION = '2026-10';
 
-export type ConnectorErrorCode = 'VALIDATION' | 'AUTHENTICATION' | 'PERMISSION' | 'RATE_LIMITED' | 'TRANSIENT' | 'AMBIGUOUS_WRITE' | 'API_VERSION_MISMATCH' | 'UPSTREAM_REJECTED';
+export type ConnectorErrorCode = 'IDENTITY_RECONCILIATION_REQUIRED' | 'VALIDATION' | 'AUTHENTICATION' | 'PERMISSION' | 'RATE_LIMITED' | 'TRANSIENT' | 'AMBIGUOUS_WRITE' | 'API_VERSION_MISMATCH' | 'UPSTREAM_REJECTED';
 export class ConnectorError extends Error {
   constructor(
     public readonly code: ConnectorErrorCode,

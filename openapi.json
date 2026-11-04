@@ -1072,6 +1072,28 @@
               }
             }
           },
+          "409": {
+            "description": "Verified Shopify identity conflicts with the app's retained tenant/domain owner. Automatic domain rename and ownership transfer are unsupported. Preserve existing records and follow the identity reconciliation guide.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "SHOP_IDENTITY_RECONCILIATION_REQUIRED"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Provider token endpoint throttled; restart the authenticated connection flow.",
             "headers": {
@@ -1325,6 +1347,19 @@
                 },
                 "example": {
                   "error": "INVALID_WEBHOOK_SIGNATURE"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Known shop identity has an unsupported alias or inconsistent owner. Operator reconciliation is required before retrying.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayError"
+                },
+                "example": {
+                  "error": "WEBHOOK_PROCESSING_FAILED"
                 }
               }
             }
