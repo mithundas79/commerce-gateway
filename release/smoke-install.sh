@@ -5,6 +5,7 @@ umask 077
 [[ ${CI:-} == true ]] || { printf '%s\n' 'This test requires CI=true and an isolated Docker host; it deletes its test volume.' >&2; exit 2; }
 [[ $# == 1 && -f $1 ]] || { printf '%s\n' 'Usage: CI=true bash release/smoke-install.sh path/to/bundle.tar.gz' >&2; exit 2; }
 archive=$(realpath "$1")
+test_scripts=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 [[ -z $(docker ps -a --filter label=com.docker.compose.project=commerce-gateway --quiet) ]] || { printf '%s\n' 'Refusing to use an existing commerce-gateway project.' >&2; exit 1; }
 [[ -z $(docker volume ls --filter label=com.docker.compose.project=commerce-gateway --quiet) ]] || { printf '%s\n' 'Refusing to use an existing commerce-gateway volume.' >&2; exit 1; }
 temporary=$(mktemp -d)
@@ -57,11 +58,20 @@ sha256sum .env .secrets/bootstrap-api-key > "$temporary/secrets.before"
 bash release/install.sh
 sha256sum --check "$temporary/secrets.before"
 compose=(docker compose --project-name commerce-gateway --env-file .env -f compose.yaml)
+db_id=$("${compose[@]}" ps -q db)
+[[ -z $(docker port "$db_id") ]]
+[[ $(docker inspect --format '{{len .NetworkSettings.Networks}}' "$db_id") == 1 ]]
+db_network=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.NetworkID}}{{end}}' "$db_id")
+[[ $(docker network inspect --format '{{.Internal}}' "$db_network") == true ]]
+[[ $(docker inspect --format '{{.State.Health.Status}}' "$("${compose[@]}" ps -q api)") == healthy ]]
+[[ $(docker inspect --format '{{.State.Health.Status}}' "$("${compose[@]}" ps -q worker)") == healthy ]]
 tenant_id=$(sed -n 's/^TENANT_ID=//p' .env)
 [[ $("${compose[@]}" exec -T db psql -U gateway -d gateway -Atc 'SELECT count(*) FROM tenants') == 1 ]]
 [[ $("${compose[@]}" exec -T db psql -U gateway -d gateway -Atc 'SELECT count(*) FROM api_keys') == 1 ]]
 api_key=$(cat .secrets/bootstrap-api-key)
 curl --fail --silent --show-error -H "Authorization: Bearer $api_key" https://localhost:3443/v1/connections >/dev/null
+curl --fail --silent --show-error -H "Authorization: Bearer $api_key" https://localhost:3443/v1/health >/dev/null
+[[ $(curl --silent --output /dev/null --write-out '%{http_code}' https://localhost:3443/v1/health) == 401 ]]
 [[ $(curl --silent --output /dev/null --write-out '%{http_code}' https://localhost:3443/v1/connections) == 401 ]]
 unset api_key
 
@@ -75,26 +85,8 @@ backup_dir=$(find "$temporary/backups" -mindepth 1 -maxdepth 1 -type d)
 [[ -s "$backup_dir/database.dump" && -f "$backup_dir/env" && -f "$backup_dir/bootstrap-api-key" ]]
 cmp .secrets/tenants/restore-probe.env "$backup_dir/tenants/restore-probe.env"
 "${compose[@]}" down --volumes
-# A fresh database plus recovered files models loss of the installation volume.
-cp "$backup_dir/env" .env
-cp "$backup_dir/bootstrap-api-key" .secrets/bootstrap-api-key
-rm .secrets/tenants/restore-probe.env
-cp -R "$backup_dir/tenants/." .secrets/tenants/
-cmp .secrets/tenants/restore-probe.env "$backup_dir/tenants/restore-probe.env"
-"${compose[@]}" up -d --wait --wait-timeout 120 db
-"${compose[@]}" exec -T db pg_restore --username=gateway --dbname=gateway --exit-on-error < "$backup_dir/database.dump"
-bash release/install.sh
-sha256sum --check "$temporary/secrets.before"
-"${compose[@]}" run --rm --no-deps -T -e "TENANT_ID=$tenant_id" api node --input-type=module -e '
-  import assert from "node:assert/strict";
-  import { Pool } from "pg";
-  import { PostgresStore } from "./dist/store.js";
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-  try {
-    const app = await new PostgresStore(pool, process.env.MASTER_KEY).getApp(process.env.TENANT_ID);
-    assert.equal(app.clientSecret, "ci-encrypted-restore-probe");
-    const counts = await pool.query("SELECT (SELECT count(*) FROM tenants)::int AS tenants, (SELECT count(*) FROM api_keys)::int AS keys");
-    assert.deepEqual(counts.rows[0], { tenants: 1, keys: 1 });
-  } finally { await pool.end(); }
-'
-printf '%s\n' 'PASS: prebuilt install, trusted HTTPS, worker/API health, scoped key, idempotent reinstall, backup/restore, and encrypted credential recovery.'
+kill "$proxy_pid"
+wait "$proxy_pid" 2>/dev/null || true
+proxy_pid=
+bash "$test_scripts/smoke-clean-host.sh" "$archive" "$backup_dir" "$temporary/secrets.before"
+printf '%s\n' 'PASS: prebuilt install, trusted HTTPS, worker/API health, scoped key, idempotent reinstall, backup, and clean Docker host recovery.'
