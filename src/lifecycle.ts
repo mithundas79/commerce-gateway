@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
 import { hashOAuthValue, lifecycleTopics, ShopifyOAuth, verifyShopifyWebhook, webhookBinding, type LifecycleTopic as Topic } from './oauth.js';
 import { ConnectorError, ShopifyConnector, validateShop } from './shopify.js';
-import { PostgresStore } from './store.js';
+import { assertShopIdentityOwner, PostgresStore } from './store.js';
 
 export const shopifyWebhookRoute = '/webhooks/shopify/:clientId/:topic/:binding';
 export { lifecycleTopics, webhookBinding, webhookSubscriptions } from './oauth.js';
@@ -61,6 +61,10 @@ export class ShopifyLifecycle {
       JOIN shopify_shop_owners o ON o.client_id=a.client_id AND o.shop=c.shop AND o.tenant_id=c.tenant_id
       WHERE a.client_id=$1 AND (($2::text IS NOT NULL AND c.shop=$2) OR ($2::text IS NULL AND c.shopify_shop_id=$3))`,[clientId,signed.shop ?? null,signed.shopId]);
     if (found.rows.length !== 1) {
+      const known = await this.pool.query('SELECT shop FROM shopify_shop_id_owners WHERE client_id=$1 AND shop_id=$2',[clientId,signed.shopId]);
+      if (known.rows.length || found.rows.length > 1) {
+        throw new ConnectorError('IDENTITY_RECONCILIATION_REQUIRED','Shop identity requires operator reconciliation',409);
+      }
       const receipt = await this.pool.query(`SELECT id FROM shopify_lifecycle_events WHERE client_id=$1 AND topic=$2 AND body_hash=$3
         AND status='processed' LIMIT 1`,[clientId,topic,createHash('sha256').update(body).digest('hex')]);
       if (receipt.rows.length) return undefined;
@@ -74,8 +78,9 @@ export class ShopifyLifecycle {
     if (headerShop !== connection.shop) throw new ConnectorError('VALIDATION','Shop header mismatch',400);
     if (connection.shopify_shop_id && connection.shopify_shop_id !== signed.shopId) throw new ConnectorError('VALIDATION','Shop identity mismatch',400);
     return this.transaction(connection.tenant_id,async db => {
-      const current = (await db.query('SELECT authorization_generation FROM connections WHERE id=$1 AND tenant_id=$2 FOR UPDATE',[connection.id,connection.tenant_id])).rows[0];
+      const current = (await db.query('SELECT authorization_generation,shopify_shop_id FROM connections WHERE id=$1 AND tenant_id=$2 FOR UPDATE',[connection.id,connection.tenant_id])).rows[0];
       if (current?.authorization_generation !== connection.authorization_generation) throw new ConnectorError('TRANSIENT','Installation changed',503,true);
+      await assertShopIdentityOwner(db,clientId,signed.shopId,connection.tenant_id,connection.shop,!current.shopify_shop_id);
       const id = randomUUID();
       const result = await db.query(`INSERT INTO shopify_lifecycle_events
         (id,client_id,topic,body_hash,generation,tenant_id,connection_id,shop,status)
@@ -103,7 +108,7 @@ export class ShopifyLifecycle {
     let inactive = false;
     let tokenSnapshot: string | undefined;
     try {
-      const row = (await this.pool.query('SELECT authorization_generation,revoked_at FROM connections WHERE id=$1 AND tenant_id=$2',[event.connection_id,event.tenant_id])).rows[0];
+      const row = (await this.pool.query('SELECT authorization_generation,revoked_at,shopify_shop_id FROM connections WHERE id=$1 AND tenant_id=$2',[event.connection_id,event.tenant_id])).rows[0];
       if (!row || row.authorization_generation !== event.generation) return await this.complete(event,false,'ignored');
       const tokens = await this.store.get(event.tenant_id,event.shop);
       if (!tokens) {
@@ -117,7 +122,12 @@ export class ShopifyLifecycle {
         const current = snapshot?.tokens;
         tokenSnapshot=snapshot?.ciphertext;
         if (!current || current.accessToken !== accessToken) throw new ConnectorError('TRANSIENT','Credentials changed during reconciliation',503,true);
-        try { await this.connector.readShopIdentity({shop:event.shop,accessToken}); }
+        try {
+          const verified = await this.connector.readShopIdentity({shop:event.shop,accessToken});
+          if (row.shopify_shop_id && verified.id !== row.shopify_shop_id) {
+            throw new ConnectorError('IDENTITY_RECONCILIATION_REQUIRED','Authenticated shop identity changed',409);
+          }
+        }
         catch (error) {
           // An expired token or failed refresh does not prove that the merchant uninstalled.
           if (error instanceof ConnectorError && error.code === 'AUTHENTICATION' && current && current.expiresAt > Date.now()+60_000) inactive=true;
@@ -127,7 +137,7 @@ export class ShopifyLifecycle {
       await this.complete(event,inactive,inactive ? 'processed' : 'ignored',tokenSnapshot);
     } catch (error) {
       const code = error instanceof ConnectorError ? error.code : 'TRANSIENT';
-      const actionRequired = code === 'AUTHENTICATION' || event.attempt_count >= 8;
+      const actionRequired = code === 'AUTHENTICATION' || code === 'IDENTITY_RECONCILIATION_REQUIRED' || event.attempt_count >= 8;
       await this.pool.query(`UPDATE shopify_lifecycle_events SET status=$2,last_error=$3,updated_at=clock_timestamp()
         WHERE id=$1 AND status='pending' AND fence_token=$4`,[event.id,actionRequired ? 'action_required' : 'pending',code,event.fence_token]);
     }
@@ -137,11 +147,14 @@ export class ShopifyLifecycle {
     await this.transaction(event.tenant_id,async db => {
       const receipt=(await db.query('SELECT status,fence_token FROM shopify_lifecycle_events WHERE id=$1 FOR UPDATE',[event.id])).rows[0];
       if (receipt?.status!=='pending' || receipt.fence_token!==event.fence_token) return;
-      const current = (await db.query(`SELECT c.authorization_generation,c.token_ciphertext,a.client_id FROM connections c
+      const current = (await db.query(`SELECT c.authorization_generation,c.token_ciphertext,c.shopify_shop_id,a.client_id FROM connections c
         JOIN shopify_apps a ON a.tenant_id=c.tenant_id WHERE c.id=$1 AND c.tenant_id=$2 FOR UPDATE OF c`,[event.connection_id,event.tenant_id])).rows[0];
       const sameInstallation = current?.authorization_generation === event.generation && current.client_id === event.client_id;
       if (!sameInstallation) status='ignored';
       if (sameInstallation && inactive && tokenSnapshot !== undefined && current.token_ciphertext !== tokenSnapshot) throw new ConnectorError('TRANSIENT','Credentials changed during reconciliation',503,true);
+      if (sameInstallation && current.shopify_shop_id) {
+        await assertShopIdentityOwner(db,event.client_id,current.shopify_shop_id,event.tenant_id,event.shop);
+      }
       if (sameInstallation && inactive) {
         await db.query(`UPDATE connections SET revoked_at=clock_timestamp(),token_ciphertext='',lifecycle_hold=true,updated_at=clock_timestamp()
           WHERE id=$1 AND tenant_id=$2`,[event.connection_id,event.tenant_id]);

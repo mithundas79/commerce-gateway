@@ -74,7 +74,9 @@ export function createRuntime(pool: Pool, masterKey: string, baseUrl: string, lo
       return { connected:true, shop:completed.shop };
     } catch (error) {
       const status = error instanceof ConnectorError && error.status < 500 ? error.status : 502;
-      return reply.code(status).send({ error:'OAUTH_FAILED' });
+      const code = error instanceof ConnectorError && error.code === 'IDENTITY_RECONCILIATION_REQUIRED'
+        ? 'SHOP_IDENTITY_RECONCILIATION_REQUIRED' : 'OAUTH_FAILED';
+      return reply.code(status).send({ error:code });
     }
   });
 
