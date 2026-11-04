@@ -257,11 +257,17 @@ export async function benchmark(env = process.env) {
   }
 }
 
+
+/** Shared by the CLI and deterministic shell exit-propagation verification. */
+export function emitBenchmarkReport(report) {
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  if (!report.passed) process.exitCode = 1;
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const report = await benchmark();
-    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-    if (!report.passed) process.exitCode = 1;
+    emitBenchmarkReport(report);
   } catch (error) {
     // Configuration messages contain names only; DB exception messages can contain credentials.
     const message = /^(BENCH_|Benchmark requires|Benchmark warmup)/.test(error?.message ?? '')

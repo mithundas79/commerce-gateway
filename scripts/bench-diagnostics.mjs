@@ -6,7 +6,7 @@ const snapshotSql = `
     'walLsn', pg_current_wal_lsn(),
     'wal', (SELECT to_jsonb(w) FROM pg_stat_wal w),
     'io', (SELECT jsonb_agg(to_jsonb(i) ORDER BY backend_type,object,context) FROM pg_stat_io i),
-    'slru', (SELECT jsonb_agg(to_jsonb(s) ORDER BY name) FROM pg_stat_slru s WHERE name IN ('MultiXactMember','MultiXactOffset','Xact')),
+    'slru', (SELECT jsonb_agg(to_jsonb(s) ORDER BY name) FROM pg_stat_slru s),
     'checkpointer', (SELECT to_jsonb(c) FROM pg_stat_checkpointer c),
     'database', (SELECT to_jsonb(d) FROM pg_stat_database d WHERE datname=current_database()),
     'settings', (SELECT jsonb_object_agg(name,setting) FROM pg_settings WHERE name IN (
