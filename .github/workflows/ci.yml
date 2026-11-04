@@ -45,7 +45,20 @@ jobs:
       - run: npm run test:integration
       - name: Measure local gateway overhead
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: BENCH_DATABASE_URL="$DATABASE_URL" npm run bench
+        env:
+          BENCH_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          BENCH_DATABASE_URL="$DATABASE_URL" BENCH_DIAGNOSTICS=1 node scripts/bench.mjs 2> >(tee benchmark.stderr >&2) | tee benchmark.json
+      - name: Preserve benchmark evidence
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            benchmark.json
+            benchmark.stderr
+          if-no-files-found: warn
+          retention-days: 14
       - name: Verify release archive
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node scripts/verify-package.mjs

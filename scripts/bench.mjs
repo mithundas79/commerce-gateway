@@ -4,6 +4,7 @@ import os from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
+import { startEnqueueDiagnostics } from './bench-diagnostics.mjs';
 
 /** Nearest-rank percentiles; all attempted request latencies are included. */
 export function summarize(samples, errors = 0, elapsedMs = 0) {
@@ -99,15 +100,21 @@ export async function benchmark(env = process.env) {
   const p95ThresholdMs = integer(env, 'BENCH_P95_MS', 100, 1, 120_000);
   const pgPoolSize = integer(env, 'BENCH_POOL_SIZE', 16, 1, 1_024);
   const replayKeys = integer(env, 'BENCH_REPLAY_KEYS', 20, 1, 10_000);
+  const diagnosticsEnabled = env.BENCH_DIAGNOSTICS === '1';
   const pg = await import('pg');
   const { Pool } = pg.default ?? pg;
   const apiModule = env.BENCH_API_MODULE
     ? pathToFileURL(resolve(env.BENCH_API_MODULE)).href : new URL('../dist/api.js', import.meta.url).href;
   const { buildApi } = await import(apiModule);
   const schema = `bench_${randomUUID().replaceAll('-', '')}`;
+  const applicationName = `commerce-benchmark-${schema}`;
+  const diagnosticOptions = diagnosticsEnabled ? ' -c track_io_timing=on -c track_wal_io_timing=on' : '';
+  const observer = diagnosticsEnabled ? new Pool({ connectionString: databaseUrl, max: 1,
+    application_name: 'commerce-benchmark-observer', options: diagnosticOptions.trim(),
+    connectionTimeoutMillis: timeoutMs, statement_timeout: 1_000 }) : undefined;
   const admin = new Pool({ connectionString: databaseUrl, max: 1 });
   const pool = new Pool({ connectionString: databaseUrl, max: pgPoolSize,
-    options: `-c search_path=${schema}`, connectionTimeoutMillis: timeoutMs, statement_timeout: timeoutMs });
+    application_name: applicationName, options: `-c search_path=${schema}${diagnosticOptions}`, connectionTimeoutMillis: timeoutMs, statement_timeout: timeoutMs });
   let app;
   let schemaCreated = false;
   try {
@@ -175,8 +182,17 @@ export async function benchmark(env = process.env) {
       }
     };
     const workload = async (name, request) => {
-      const result = await runLoad({ requests, concurrency, request });
-      return { name, ...result, passed: result.errors === 0 && result.p95Ms <= p95ThresholdMs };
+      const capture = observer && name === 'durable_unique_enqueue'
+        ? await startEnqueueDiagnostics({ observer, applicationPool: pool, applicationName }) : undefined;
+      let result;
+      let diagnostics;
+      try {
+        result = await runLoad({ requests, concurrency, request });
+      } finally {
+        if (capture) diagnostics = await capture.finish();
+      }
+      return { name, ...result, ...(diagnostics ? { diagnostics } : {}),
+        passed: result.errors === 0 && result.p95Ms <= p95ThresholdMs && (!diagnostics || diagnostics.passed) };
     };
     const warmupRead = await runLoad({ requests: warmup, concurrency, request: read });
     const warmupEnqueue = await runLoad({ requests: warmup, concurrency,
@@ -210,6 +226,7 @@ export async function benchmark(env = process.env) {
     const durableRowsPassed = actualRows === expectedRows;
     return {
       benchmark: 'commerce-gateway-local-overhead', timestamp: new Date().toISOString(),
+      testedRevision: env.GITHUB_SHA ?? null, sourceRevision: env.BENCH_SOURCE_SHA ?? null,
       measurement: 'Loopback TCP HTTP response including auth, validation, PostgreSQL and JSON; excludes Shopify network/worker completion. Closed-loop clients; no open-loop saturation claim.',
       resourceMeasurement: {
         scope: 'Current Node.js process combines the gateway API and HTTP load generator. PostgreSQL runs separately and is excluded.',
@@ -223,7 +240,7 @@ export async function benchmark(env = process.env) {
       config: { requestsPerWorkload: requests, concurrency,
         warmup: { authenticated_product_read: warmup, durable_unique_enqueue: warmup,
           durable_idempotent_replay: warmup, durable_contended_idempotency: 0 },
-        pgPoolSize, replayKeys, timeoutMs, p95ThresholdMs, loggerEnabled: false, percentileMethod: 'nearest-rank' },
+        pgPoolSize, replayKeys, timeoutMs, p95ThresholdMs, diagnosticsEnabled, loggerEnabled: false, percentileMethod: 'nearest-rank' },
       workloads: results,
       errors: results.reduce((sum, result) => sum + result.errors, 0),
       durability: { expectedOperationRows: expectedRows, actualOperationRows: actualRows, passed: durableRowsPassed },
@@ -233,6 +250,7 @@ export async function benchmark(env = process.env) {
     try { if (app) await app.close(); }
     finally {
       await pool.end();
+      if (observer) await observer.end();
       try { if (schemaCreated) await admin.query(`DROP SCHEMA ${schema} CASCADE`); }
       finally { await admin.end(); }
     }
