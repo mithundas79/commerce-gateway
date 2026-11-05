@@ -27,6 +27,10 @@ trap cleanup EXIT
 tar -xzf "$archive" -C "$temporary"
 cd "$temporary/commerce-gateway"
 [[ -f BUNDLE_PLATFORM && ! -e package.json && ! -d src && ! -f compose.build.yaml ]]
+for guide in release/README.md release/shopify-lifecycle.md release/shopify-smoke.md; do
+  [[ -s "$guide" ]] || { printf 'Missing installer guide: %s\n' "$guide" >&2; exit 1; }
+  grep -Fq "  $guide" SHA256SUMS || { printf 'Unchecked installer guide: %s\n' "$guide" >&2; exit 1; }
+done
 sha256sum --check --strict SHA256SUMS
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost \
   -addext subjectAltName=DNS:localhost -keyout "$temporary/server.key" -out "$temporary/server.crt" >/dev/null 2>&1

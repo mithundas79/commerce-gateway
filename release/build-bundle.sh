@@ -28,7 +28,7 @@ docker pull --platform "$platform" postgres:18.6-bookworm
 [[ $(docker image inspect postgres:18.6-bookworm --format '{{.Os}}/{{.Architecture}}') == "$platform" ]]
 docker save commerce-gateway:local postgres:18.6-bookworm | gzip -1 > "$bundle/images.tar.gz"
 cp compose.yaml "$bundle/compose.yaml"
-cp release/install.sh release/backup.sh release/README.md "$bundle/release/"
+cp release/install.sh release/backup.sh release/README.md release/shopify-lifecycle.md release/shopify-smoke.md "$bundle/release/"
 for file in README.md LICENSE; do [[ ! -f $file ]] || cp "$file" "$bundle/"; done
 cp "$staging/node-manifest.txt" "$staging/postgres-manifest.txt" "$bundle/"
 printf '%s\n' "$platform" > "$bundle/BUNDLE_PLATFORM"
@@ -36,7 +36,7 @@ printf '%s\n' "$version" > "$bundle/BUNDLE_VERSION"
 docker image inspect commerce-gateway:local postgres:18.6-bookworm --format '{{json .}}' > "$bundle/IMAGE_METADATA.jsonl"
 (
   cd "$bundle"
-  sha256sum images.tar.gz compose.yaml release/install.sh release/backup.sh BUNDLE_PLATFORM BUNDLE_VERSION > SHA256SUMS
+  sha256sum images.tar.gz compose.yaml release/install.sh release/backup.sh release/README.md release/shopify-lifecycle.md release/shopify-smoke.md BUNDLE_PLATFORM BUNDLE_VERSION > SHA256SUMS
 )
 archive="commerce-gateway-${version}-${platform//\//-}.tar.gz"
 tar -C "$staging" -czf "$output/$archive" commerce-gateway

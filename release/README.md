@@ -14,7 +14,7 @@ gateway.example.com {
 
 ## Install a prebuilt bundle
 
-Download the archive and matching `.sha256` asset for your release and architecture from a trusted release page. No public release has been published by this change. Replace `vX.Y.Z` below with the downloaded version; use `linux-arm64` for an ARM64 Docker host:
+Download the archive and matching `.sha256` asset for your release and architecture from the [GitHub releases page](https://github.com/mithundas79/commerce-gateway/releases). Alpha versions are GitHub pre-releases. Replace `vX.Y.Z` below with the downloaded version; use `linux-arm64` for an ARM64 Docker host:
 
 ```bash
 archive=commerce-gateway-vX.Y.Z-linux-amd64.tar.gz
