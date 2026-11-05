@@ -1,0 +1,150 @@
+{
+  "acceptance": "windows-shopify-lab-live",
+  "completedAt": "2026-11-05T07:24:19.611Z",
+  "sourceCommit": "ceb5408d2746392615329a7fa964470daea6d165",
+  "shop": "commerce-gateway-lab.myshopify.com",
+  "productId": "gid://shopify/Product/10279219986688",
+  "recovery": {
+    "savedMutationRunAtResume": false,
+    "initialConnectionCount": 0,
+    "initialOperationCount": 0
+  },
+  "readiness": {
+    "localStatus": 200,
+    "publicStatus": 200,
+    "authenticatedHealthStatus": 200,
+    "unauthenticatedHealthStatus": 401
+  },
+  "oauth": {
+    "verified": true,
+    "scope": "write_products",
+    "connectionId": "bde6d38a-c61e-4779-8794-44e38e8ec9be"
+  },
+  "preflight": {
+    "shop": "commerce-gateway-lab.myshopify.com",
+    "developmentStore": true,
+    "plan": "Basic",
+    "app": "Commerce Gateway Lab",
+    "connectionId": "bde6d38a-c61e-4779-8794-44e38e8ec9be",
+    "product": {
+      "id": "gid://shopify/Product/10279219986688",
+      "status": "DRAFT",
+      "titleSha256": "c630116ca02501701ef1bc7875f3d4731f699754b2fc17d6498beff9c7d8913f",
+      "updatedAt": "2026-11-04T08:58:15Z"
+    },
+    "apiVersion": "2026-10",
+    "uninstallWebhook": {
+      "verified": true,
+      "id": "gid://shopify/WebhookSubscription/2105424052480",
+      "mode": "shop-specific",
+      "topic": "APP_UNINSTALLED",
+      "apiVersion": "2026-10"
+    }
+  },
+  "pagination": {
+    "pages": 18,
+    "productsRead": 18,
+    "pageSize": 1
+  },
+  "smoke": {
+    "acceptance": "shopify-disposable-product",
+    "runId": "84fceb38-8d34-4ab7-808f-018ec88ade55",
+    "passed": true,
+    "restored": true,
+    "manualReconciliationRequired": false,
+    "temporaryOperationIds": [
+      "7b769b63-7fa2-44b7-87fe-3a66a93f9b4f"
+    ],
+    "restoreOperationId": "6afcb8df-dc93-404d-9e79-9608ea03f914",
+    "error": null
+  },
+  "independentRestoration": {
+    "shop": "commerce-gateway-lab.myshopify.com",
+    "developmentStore": true,
+    "plan": "Basic",
+    "app": "Commerce Gateway Lab",
+    "connectionId": "bde6d38a-c61e-4779-8794-44e38e8ec9be",
+    "product": {
+      "id": "gid://shopify/Product/10279219986688",
+      "status": "DRAFT",
+      "titleSha256": "c630116ca02501701ef1bc7875f3d4731f699754b2fc17d6498beff9c7d8913f",
+      "updatedAt": "2026-11-05T07:20:49Z",
+      "originalTitleMatches": true
+    },
+    "apiVersion": "2026-10"
+  },
+  "uninstall": {
+    "acceptance": "shopify-uninstall",
+    "passed": true,
+    "connectionId": "bde6d38a-c61e-4779-8794-44e38e8ec9be",
+    "shop": "commerce-gateway-lab.myshopify.com",
+    "providerTokenStatus": 401,
+    "event": {
+      "id": "ecf7c8a8-15bb-4870-90ca-fc20e57ed07e",
+      "status": "processed",
+      "attempt_count": 1,
+      "last_error": null,
+      "created_at": "2026-11-05T07:22:37.400Z",
+      "updated_at": "2026-11-05T07:22:38.007Z"
+    },
+    "revoked": {
+      "revoked": true,
+      "tokens_cleared": true,
+      "lifecycle_hold": true
+    },
+    "pending": {
+      "oauth_states": 0,
+      "browser_tickets": 0
+    }
+  },
+  "postUninstall": {
+    "connections": {
+      "status": 200,
+      "count": 0
+    },
+    "productRead": {
+      "status": 404,
+      "error": "CONNECTION_NOT_FOUND"
+    },
+    "productWrite": {
+      "status": 404,
+      "error": "CONNECTION_NOT_FOUND"
+    }
+  },
+  "operations": {
+    "operationCount": 2,
+    "successful": 2,
+    "otherProductOperations": 0,
+    "unfinished": 0
+  },
+  "deployment": {
+    "status": "success",
+    "app": "Commerce Gateway Lab",
+    "released": true,
+    "version": "lab-acceptance-2026-11-05",
+    "versionGid": "gid://shopify/Version/1195645173761",
+    "complianceSubscriptions": 3,
+    "uninstallSubscription": "shop-specific; registered and independently verified before uninstall"
+  },
+  "runbookFindings": [
+    {
+      "code": "WEBHOOK_TOML_TRAILING_DIAGNOSTIC",
+      "resolution": "Removed the exact trailing Administration command completed diagnostic from private generated TOML. Repository source unchanged."
+    },
+    {
+      "code": "LEGACY_OAUTH_APP_SPECIFIC_WEBHOOK_INCOMPATIBLE",
+      "resolution": "Deployed three compliance subscriptions and registered/read back APP_UNINSTALLED as a shop-specific subscription through Shopify Admin GraphQL. Genuine uninstall receipt processed."
+    }
+  ],
+  "limitations": [
+    "Live privacy erasure/customer-data events were not triggered.",
+    "Only the named draft product was mutated; this does not qualify every production-release gate."
+  ],
+  "secretsIncluded": false,
+  "passed": true,
+  "remainingAcceptanceBlockers": [],
+  "followUpRequired": [
+    "Fix admin shopify-webhooks stdout so redirected output is valid TOML.",
+    "Correct the runbook to use a supported webhook deployment with legacy OAuth."
+  ]
+}

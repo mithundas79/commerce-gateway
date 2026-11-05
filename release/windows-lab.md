@@ -6,7 +6,7 @@ Keep one verified HTTPS reverse proxy or tunnel forwarding to `127.0.0.1:3000` a
 
 Create or select a private local settings file outside the lab checkout. Pass its path with `-ShopifyEnvPath`. The helper reads only `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, and optional `SHOPIFY_SCOPES` (default `write_products`). These must be the app client credentials. Other settings are ignored. Literal single-line bare or quoted values and an optional `export` prefix are supported. Duplicate selected keys, multiline values, quoted escapes, and unquoted whitespace are rejected. Values are never evaluated, expanded, printed, or copied into the generated installation `.env`. The app secret goes to `configure-shopify` through child-process environment variables and is encrypted by the gateway in PostgreSQL.
 
-Run one command from that checkout in PowerShell. Replace the placeholders with your verified gateway origin, exact canonical development shop, and settings file path.
+For a new app or a changed tunnel, first run `-PrepareOnly` as shown below, deploy the three compliance subscriptions and matching OAuth callback, then run the following nonmutation command. Replace the placeholders with your verified gateway origin, exact canonical development shop, and settings file path.
 
 ```powershell
 .\release\windows-lab.ps1 -ShopifyEnvPath 'C:\private\shopify.env' -PublicOrigin 'https://gateway.your-domain.tld' -Shop 'your-disposable-store.myshopify.com'
@@ -26,6 +26,28 @@ Use `-PrepareOnly` when the Docker operator will hand the configured service to 
 
 The command completes installation, repeated migration/bootstrap, public HTTPS readiness, and secure tenant Shopify configuration, then exits with a fixed setup report and the exact callback URL. It creates no OAuth/browser ticket, opens no browser, performs no connection polling, and submits no product write. Keep the HTTPS ingress running for the subsequent browser callback. `-PrepareOnly` rejects mutation acknowledgement/target arguments, `-AllowMutation`, `-Resume`, and `-NewRun`. An existing incomplete mutation run retains its recovery guards.
 
+## Deploy lifecycle settings and verify the connected shop
+
+After `-PrepareOnly`, generate the default tenant's compliance TOML. Keep `.secrets` restricted to the operating account. Windows PowerShell 5.1's native `>` redirection uses UTF-16; this example writes UTF-8 without a BOM for Shopify CLI. Stdout contains only TOML, so no diagnostic-line filtering is needed.
+
+```powershell
+$toml = & docker compose run --rm --no-deps -T --env-from-file .env api node dist/admin.js shopify-webhooks
+if ($LASTEXITCODE -ne 0) { throw 'Compliance configuration generation failed' }
+[IO.File]::WriteAllLines((Join-Path $PWD '.secrets/shopify-webhooks.toml'), [string[]]$toml, [Text.UTF8Encoding]::new($false))
+Remove-Variable toml
+```
+
+Merge the complete generated table and three compliance subscription blocks into the matching linked private app project's `shopify.app.toml`; retain `embedded = false`, `write_products`, `use_legacy_install_flow = true` and the exact callback. Deploy with `shopify app deploy` and verify the released configuration as in [lifecycle setup](shopify-lifecycle.md). Keep the linked app project private because it contains capability URLs. No `app/uninstalled` block belongs in this app TOML.
+
+Run the nonmutation lab command above and approve that exact shop in the browser. Once it reports a verified connection/product read, register and independently verify the uninstall subscription:
+
+```powershell
+docker compose run --rm --no-deps -T --env-from-file .env -e SHOPIFY_SHOP=your-disposable-store.myshopify.com api node dist/admin.js shopify-uninstall-webhook
+if ($LASTEXITCODE -ne 0) { throw 'Uninstall subscription registration or verification failed' }
+```
+
+Require a JSON receipt with `verified: true`, `topic: "APP_UNINSTALLED"` and `apiVersion: "2026-10"`. Repeating this command verifies the same subscription without a duplicate. The command reads encrypted credentials internally; no token extraction or private GraphQL script is required. Run it again after a reinstall. Resolve any stale endpoint conflict using the lifecycle guide before continuing. Only then run the guarded product test below; restore the title before uninstalling and verifying the genuine webhook receipt, cleared credentials and denied subsequent access.
+
 ## Explicit disposable product test
 
 Independently confirm that the exact shop is a disposable development store, reserve one disposable product, and stop other writers to it through verified restoration. Shopify's development-store billing status cannot be established by this gateway. Add every mutation argument to the same command only when you intend the real temporary title write and restoration.
@@ -42,4 +64,6 @@ An interrupted or failed mutation run blocks a fresh run. Read the saved report 
 
 If a forcibly terminated helper leaves `.secrets/windows-lab.lock`, verify that no lab command is active before removing that file. The installer's `.secrets/install.lock` has its own recovery guidance. Preserve the run state and database while resolving failed prerequisites, lost ingress, pending operations, or uncertain provider outcomes. Cleanup after forced termination requires explicit recovery.
 
-The helper's parser, opt-in guards, loopback transport, historical-status distinction, and browser URL validation have offline tests. The PowerShell wrapper was executed under Windows PowerShell 5.1 with an invalid HTTP origin and rejected it before settings, Docker, or network access. `powershell.exe -NoProfile -NonInteractive -File tests/windows-lab-wrapper.test.ps1` validates the wrapper handoff with spaced paths and a quoted product title using a fake Node command. The wrapper transfers its options as JSON in the child environment to preserve exact title characters through Windows PowerShell 5.1. A real Windows Docker install, Shopify OAuth approval, and development-store write/restore must still be run by an operator to produce issue #6's live acceptance evidence.
+The helper's parser, opt-in guards, loopback transport, historical-status distinction, and browser URL validation have offline tests. `powershell.exe -NoProfile -NonInteractive -File tests/windows-lab-wrapper.test.ps1` validates Windows PowerShell 5.1 handoff with spaced paths and a quoted title using a fake Node command. The wrapper transfers options as JSON in the child environment to preserve exact title characters.
+
+Live acceptance on 2026-11-05 at `ceb5408d2746392615329a7fa964470daea6d165` verified Docker, local/public readiness, OAuth, 18 paginated product reads, guarded title change/restoration on draft product `10279219986688` in `commerce-gateway-lab.myshopify.com`, and genuine uninstall delivery/token revocation. Its original report is retained in `release-artifacts/windows-lab-acceptance-2026-11-05.json`. That historical run required removing a stdout diagnostic and moving uninstall registration out of app TOML; the corrected commands above address those setup defects. Compliance configuration was deployed and read back; live privacy events were not exercised. Reuse this evidence only with an explicit assessment of changes since that commit.

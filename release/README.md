@@ -136,7 +136,9 @@ unset SHOPIFY_CLIENT_ID SHOPIFY_CLIENT_SECRET SHOPIFY_SCOPES SHOPIFY_RETURN_URLS
 
 The app secret is encrypted in `shopify_apps`; the raw value is not written to a host credential file by this command. Rerun it to update the same app's credentials. Changing the app client ID while its tenant has active store connections is rejected; revoke/reconnect those stores before changing app identity. Keep the same app identity for a connected store and do not treat two tenants as interchangeable merchant identities.
 
-The client's backend then calls `POST /v1/shopify/connect` with its tenant bearer key and a `shop` such as `example-store.myshopify.com`. Send the merchant's browser to the returned `browserStartUrl` within 120 seconds; it is single use. The callback is public but validates Shopify's signature, state, and browser binding. See the [request examples](../README.md#merchant-authorization) for the connect/read/write flow.
+Before connecting the first shop, generate and deploy the three compliance subscriptions using [lifecycle setup, stage 1](shopify-lifecycle.md#1-deploy-the-compliance-subscriptions). Keep the standalone OAuth settings above; do not add `app/uninstalled` to the app TOML.
+
+The client's backend then calls `POST /v1/shopify/connect` with its tenant bearer key and a `shop` such as `example-store.myshopify.com`. Send the merchant's browser to the returned `browserStartUrl` within 120 seconds; it is single use. The callback is public but validates Shopify's signature, state, and browser binding. After confirming the connection, run `admin shopify-uninstall-webhook` for that exact tenant/shop as documented in [lifecycle setup, stage 2](shopify-lifecycle.md#2-connect-the-shop-then-register-and-verify-uninstall). Require its verified receipt before accepting product writes. See the [request examples](../README.md#merchant-authorization) for the connect/read/write flow.
 
 ## Health and diagnostics
 
@@ -187,5 +189,5 @@ Only a `v*` Git tag can trigger the publishing job, after both architecture chec
 
 ## Shopify lifecycle subscriptions
 
-Complete the four app-specific webhook subscriptions and recovery monitoring in [Shopify lifecycle configuration](shopify-lifecycle.md) for every configured Shopify app before accepting merchant traffic. The guide includes the exact protected TOML generator, raw-byte signature handling, uninstall and privacy erasure behavior, replay protection and operator handling for unresolved installation state.
+Deploy the three app-wide compliance subscriptions for each configured app, register and verify the shop-specific `APP_UNINSTALLED` subscription after each merchant installation, and enable recovery monitoring before accepting merchant traffic. [Shopify lifecycle configuration](shopify-lifecycle.md) gives the protected TOML generator, Admin GraphQL registration/readback command, raw-byte signature handling, uninstall and privacy erasure behavior, replay protection and operator recovery.
 

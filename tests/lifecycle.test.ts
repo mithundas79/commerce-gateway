@@ -16,8 +16,10 @@ test('topic URLs use a distinct HMAC domain and cannot be swapped across apps or
   assert.notEqual(binding,webhookBinding({...config,clientId:'other-app'},'shop-redact'));
   assert.notEqual(binding,createHmac('sha256',config.clientSecret).update('shop-redact').digest('base64url'));
   const toml=webhookSubscriptions(config,'https://gateway.example');
-  assert.equal((toml.match(/\[\[webhooks.subscriptions\]\]/g) ?? []).length,4);
-  for(const topic of ['app/uninstalled','customers/data_request','customers/redact','shop/redact']) assert.ok(toml.includes(`"${topic}"`));
+  assert.equal((toml.match(/\[\[webhooks.subscriptions\]\]/g) ?? []).length,3);
+  assert.ok(!toml.includes('app/uninstalled'));
+  assert.notEqual(webhookBinding(config,'app-uninstalled'),binding);
+  for(const topic of ['customers/data_request','customers/redact','shop/redact']) assert.ok(toml.includes(`"${topic}"`));
   assert.ok(toml.includes('api_version = "2026-10"'));
 });
 

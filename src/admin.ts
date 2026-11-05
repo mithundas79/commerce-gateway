@@ -7,6 +7,9 @@ import { PostgresStore } from './store.js';
 import { configureNotificationEndpoint, disableNotificationEndpoint } from './notifications.js';
 import { releaseUncertainOperation } from './worker.js';
 import { webhookSubscriptions } from './lifecycle.js';
+import { ShopifyOAuth } from './oauth.js';
+import { validateShop } from './shopify.js';
+import { ensureUninstallWebhook, WebhookSetupError } from './shopify-webhooks.js';
 
 export const help = `Commerce Gateway administration
   migrate                 Apply checksummed SQL migrations (DATABASE_URL)
@@ -15,7 +18,9 @@ export const help = `Commerce Gateway administration
   configure-shopify       Store encrypted app credentials for TENANT_ID
                           SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET, SHOPIFY_SCOPES (comma-separated)
                           optional SHOPIFY_RETURN_URLS (comma-separated), PUBLIC_BASE_URL, MASTER_KEY
-  shopify-webhooks         Print secret subscription TOML for TENANT_ID (MASTER_KEY, PUBLIC_BASE_URL)
+  shopify-webhooks         Print secret compliance TOML for TENANT_ID (MASTER_KEY, PUBLIC_BASE_URL)
+  shopify-uninstall-webhook Register/verify APP_UNINSTALLED for connected SHOPIFY_SHOP
+                          TENANT_ID, MASTER_KEY, PUBLIC_BASE_URL; prints a nonsecret JSON receipt
   shopify-lifecycle        List pending/action-required provider events for TENANT_ID
   retry-shopify-lifecycle Retry unresolved events for TENANT_ID after credential reconciliation
   configure-notification Store completion webhook (TENANT_ID, NOTIFICATION_URL, NOTIFICATION_SECRET, MASTER_KEY)
@@ -103,10 +108,35 @@ export async function revokeApiKey(pool: Pool, env: NodeJS.ProcessEnv): Promise<
 
 export async function runAdmin(args: string[], env = process.env): Promise<void> {
   if (args.length === 0 || args.length === 1 && ['--help','-h','help'].includes(args[0]!)) { console.log(help); return; }
-  if (args.length !== 1 || !['migrate','bootstrap','revoke-api-key','configure-shopify','shopify-webhooks','shopify-lifecycle','retry-shopify-lifecycle','configure-notification','disable-notification','release-uncertain'].includes(args[0]!)) throw new Error('Unknown command; use --help');
+  if (args.length !== 1 || !['migrate','bootstrap','revoke-api-key','configure-shopify','shopify-webhooks','shopify-uninstall-webhook','shopify-lifecycle','retry-shopify-lifecycle','configure-notification','disable-notification','release-uncertain'].includes(args[0]!)) throw new Error('Unknown command; use --help');
   const pool = new Pool({ connectionString: required(env,'DATABASE_URL'), connectionTimeoutMillis: 10_000 });
   try {
     switch (args[0]) {
+      case 'shopify-uninstall-webhook': {
+        const tenant = tenantId(env);
+        const shop = validateShop(required(env,'SHOPIFY_SHOP'));
+        const origin = publicBaseUrl(required(env,'PUBLIC_BASE_URL'));
+        if (!origin.startsWith('https://')) throw new WebhookSetupError('HTTPS_REQUIRED');
+        const store = new PostgresStore(pool,required(env,'MASTER_KEY'));
+        const active = async () => {
+          const result = await pool.query('SELECT id FROM connections WHERE tenant_id=$1 AND shop=$2 AND revoked_at IS NULL AND NOT lifecycle_hold',[tenant,shop]);
+          if (result.rows.length !== 1) throw new WebhookSetupError('ACTIVE_CONNECTION_REQUIRED');
+        };
+        await active();
+        await store.prepareWebhookSubscriptions(tenant);
+        const oauth = new ShopifyOAuth({getApp: id => store.getApp(id),states:store,tokens:store});
+        await oauth.accessToken(tenant,shop);
+        // Serialize setup, credential changes and lifecycle processing for this tenant.
+        // Refresh happens first because nested token locks are intentionally forbidden.
+        const receipt = await store.withLock(`${tenant}:${shop}`,async () => {
+          await active();
+          const tokens = await store.get(tenant,shop);
+          if (!tokens || tokens.expiresAt <= Date.now()+60_000) throw new WebhookSetupError('ACTIVE_CONNECTION_REQUIRED');
+          return ensureUninstallWebhook({shop,accessToken:tokens.accessToken,app:await store.getApp(tenant),origin});
+        });
+        console.log(JSON.stringify(receipt));
+        break;
+      }
       case 'shopify-webhooks': {
         const config = await new PostgresStore(pool,required(env,'MASTER_KEY')).prepareWebhookSubscriptions(tenantId(env));
         process.stdout.write(webhookSubscriptions(config,publicBaseUrl(required(env,'PUBLIC_BASE_URL'))));
@@ -153,10 +183,13 @@ export async function runAdmin(args: string[], env = process.env): Promise<void>
         break;
       }
     }
-    console.log('Administration command completed');
+    console.error('Administration command completed');
   } finally { await pool.end(); }
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  runAdmin(process.argv.slice(2)).catch(() => { console.error('Administration command failed. Check configuration and database connectivity.'); process.exitCode = 1; });
+  runAdmin(process.argv.slice(2)).catch(error => {
+    console.error(error instanceof WebhookSetupError ? `Shopify webhook setup failed: ${error.code}` : 'Administration command failed. Check configuration and database connectivity.');
+    process.exitCode = 1;
+  });
 }
