@@ -1,8 +1,10 @@
 # Shopify lifecycle subscriptions
 
-Configure these subscriptions separately for every Shopify app client ID used by this gateway. All tenants sharing that app use the same four URLs and app secret. The signed shop payload and the persisted app/shop owner select the tenant. Each app must use its real client secret consistently across those tenants.
+Configure lifecycle delivery in two stages: deploy three app-wide compliance subscriptions, then register `APP_UNINSTALLED` for every connected shop through Admin GraphQL. This is the standalone authorization-code workflow that passed live acceptance on `ceb5408d2746392615329a7fa964470daea6d165`. All tenants sharing an app use the same four topic-specific URLs and app secret. The signed shop payload and persisted app/shop owner select the tenant.
 
-After `configure-shopify`, generate the exact configuration using the tenant environment from the installation guide. Redirect output into a protected temporary file and merge its four subscription blocks into the matching Shopify app project's existing `shopify.app.toml`. The output includes `[webhooks]` with `api_version = "2026-10"`. Preserve a single `[webhooks]` table when merging.
+## 1. Deploy the compliance subscriptions
+
+After `configure-shopify`, generate configuration using the tenant environment from the installation guide. For the default installer tenant, replace `.secrets/tenants/acme.env` with `.env`; Compose interpolation alone does not pass `TENANT_ID` to the container. Redirect stdout into a protected file. Diagnostics go to stderr; do not merge stderr into this file. Merge the complete generated `[webhooks]` table and its three subscription blocks into the matching linked app's `shopify.app.toml`, retaining one `[webhooks]` table and the app's identity/OAuth settings. No output filtering or subscription removal is required.
 
 ```bash
 umask 077
@@ -10,9 +12,46 @@ docker compose run --rm --no-deps -T --env-from-file .secrets/tenants/acme.env \
   api node dist/admin.js shopify-webhooks > .secrets/shopify-webhooks.toml
 ```
 
-The generated TOML registers `app/uninstalled` through `topics`, plus separate `compliance_topics` entries for `customers/data_request`, `customers/redact` and `shop/redact`. Each uses an absolute HTTPS URI of the form `/webhooks/shopify/<client-id>/<topic-key>/<secret-binding>`. The topic keys are `app-uninstalled`, `customers-data-request`, `customers-redact` and `shop-redact`. Keep the generated full URLs private. Exclude them from proxy access logs, monitoring URLs, source control and support diagnostics. The gateway redacts request URLs in its structured logs. The binding uses a separate HMAC domain from webhook body signatures.
+The generated TOML sets `api_version = "2026-10"` and exactly these `compliance_topics`: `customers/data_request`, `customers/redact`, and `shop/redact`, each with its own absolute HTTPS URI. Keep these capability URLs private, including the linked app configuration: exclude them from Git, proxy access logs, monitoring URLs and support diagnostics. The gateway redacts request URLs in structured logs. The binding uses a separate HMAC domain from webhook body signatures.
 
-Deploy the four subscriptions from the linked app project using `shopify app deploy`. The Dev Dashboard app-version form controls OAuth redirect URLs and the webhook API version. The generated TOML plus CLI deployment configures these endpoint/topic subscriptions. Confirm the released subscriptions and successful deliveries in the app's webhook configuration and logs. For every app-secret rotation, reconfigure the gateway tenants, regenerate these URLs and deploy the matching app subscription settings together. Deliveries signed with the previous secret can fail during Shopify's rotation window. Shopify documents a delay of up to an hour before new signatures take effect. Remove existing shop-specific subscriptions for these topics when adopting app-specific subscriptions. [Subscription configuration](https://shopify.dev/docs/apps/build/webhooks/subscribe) and [signature verification](https://shopify.dev/docs/apps/build/webhooks/verify-deliveries).
+Keep `embedded = false`, `[access_scopes] scopes = "write_products"`, `use_legacy_install_flow = true`, and the exact HTTPS callback in `[auth] redirect_urls`, as in the [installation guide](README.md#configure-the-clients-shopify-app). Run `shopify app deploy` from that linked private app project. Confirm the released version has those settings and all three compliance endpoints. Fetch the released configuration with `shopify app config link` into a separate protected directory to compare it with the submitted configuration. The Dev Dashboard's callback/version fields alone do not register these subscriptions. Do not add `app/uninstalled` to the app TOML: app-specific non-compliance topics conflict with this legacy OAuth installation mode. [App configuration](https://shopify.dev/docs/apps/build/cli-for-apps/app-configuration) and [subscription configuration](https://shopify.dev/docs/apps/build/webhooks/subscribe).
+
+## 2. Connect the shop, then register and verify uninstall
+
+Complete merchant OAuth through `POST /v1/shopify/connect` and verify the requested shop appears in `GET /v1/connections`. Keep the HTTPS ingress reachable. Run this command for that exact canonical shop and tenant before accepting product writes:
+
+```bash
+docker compose run --rm --no-deps -T --env-from-file .secrets/tenants/acme.env \
+  -e SHOPIFY_SHOP=example-store.myshopify.com \
+  api node dist/admin.js shopify-uninstall-webhook
+```
+
+For the default tenant, replace `.secrets/tenants/acme.env` with `.env`. The command uses that tenant's encrypted OAuth credentials, refreshes them if needed, rejects absent/revoked/held connections, and calls `https://<shop>/admin/api/2026-10/graphql.json`. It lists existing shop-specific `APP_UNINSTALLED` subscriptions, creates one only when absent, then independently reads back the exact capability URI, topic, JSON format and API version. A repeat invocation verifies the existing subscription without creating a duplicate. Successful stdout is JSON with `verified: true`, the shop, topic, subscription ID and API version; it contains no credential or capability URL. Keep this receipt as setup evidence.
+
+The Admin GraphQL operations are:
+
+```graphql
+query GatewayUninstallWebhooks {
+  webhookSubscriptions(first: 100, topics: [APP_UNINSTALLED]) {
+    nodes { id topic uri format apiVersion { handle } }
+    pageInfo { hasNextPage }
+  }
+}
+mutation GatewayUninstallWebhook($subscription: WebhookSubscriptionInput!) {
+  webhookSubscriptionCreate(topic: APP_UNINSTALLED, webhookSubscription: $subscription) {
+    webhookSubscription { id }
+    userErrors { field message }
+  }
+}
+```
+
+The command supplies `subscription = {uri: <private app-uninstalled capability URL>, format: "JSON"}` without exposing it. The endpoint is derived from the same app secret as the compliance URLs. App-wide subscriptions are not enumerated by this shop-specific query; verify the three compliance subscriptions in the released app configuration separately. See [webhookSubscriptionCreate](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/webhookSubscriptionCreate) and [webhookSubscriptions](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/webhookSubscriptions).
+
+Run registration after every reinstall. Reconfigure, regenerate and redeploy compliance settings after an origin or app-secret change, then reconcile the connected shops' uninstall subscriptions. `SUBSCRIPTION_CONFLICT` means an old/different endpoint, format/version, duplicate subscription, or an incomplete listing (more than 100 results). Review the exact app/shop subscriptions privately through Admin GraphQL and explicitly update/remove only the obsolete registrations before rerunning; this command never deletes another subscription. `ACTIVE_CONNECTION_REQUIRED` requires a connected shop without a lifecycle hold. Resolve held events through the recovery procedure below. Transport or version errors fail closed; a timed-out creation is reconciled by read, never blindly replayed. Secret rotation can delay new webhook signatures; coordinate the gateway and Shopify settings. [Signature verification](https://shopify.dev/docs/apps/build/webhooks/verify-deliveries).
+
+## Delivery verification
+
+On an authorized disposable shop, restore any test product before uninstalling. Verify an authentic `app/uninstalled` receipt is processed, tokens are cleared and the connection is revoked, former Shopify credentials return 401, and gateway reads/writes return `CONNECTION_NOT_FOUND`. Subscription readback proves configuration; only an actual provider delivery proves live processing. Compliance events require their own authorized privacy workflow and must not be inferred from an uninstall pass.
 
 The public POST route verifies the HMAC against the original bytes before parsing JSON. An indexed hash of the supplied secret URL binding selects at most one app secret, so unsolicited packets cannot fan out across tenants sharing a public client ID. Configuration stores these hashes when the app is configured, and the TOML generator primes them for pre-upgrade app rows. The actual shop owner's app secret is verified again before processing. The secret URL binds the topic because Shopify's body signature excludes headers. The topic header must match that URL. The shop header must match the signed canonical shop domain or the domain mapped from a previously authenticated numeric shop ID. Authorization never comes from a header, a tenant ID supplied by a sender, or a delivery ID. A different delivery ID cannot bypass a stored body receipt. The route accepts JSON bodies up to 1 MiB and acknowledges only after the database stores the receipt and any protective hold. Provider HTTP runs in the durable worker after acknowledgement. [HTTPS verification requirements](https://shopify.dev/docs/apps/build/webhooks/verify-deliveries).
 

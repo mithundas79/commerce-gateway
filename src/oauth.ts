@@ -21,10 +21,11 @@ export function webhookBinding(app: Pick<ShopifyAppConfig,'clientId'|'clientSecr
   return createHmac('sha256', app.clientSecret).update(JSON.stringify(['commerce-gateway:shopify-topic-url:v1',app.clientId,topic])).digest('base64url');
 }
 export function webhookSubscriptions(app: ShopifyAppConfig, origin: string): string {
-  const entries = Object.entries(lifecycleTopics).map(([key,topic]) => {
-    const field = key === 'app-uninstalled' ? 'topics' : 'compliance_topics';
+  // Legacy authorization-code apps deploy compliance subscriptions in app config.
+  // APP_UNINSTALLED is registered for each installed shop through Admin GraphQL.
+  const entries = Object.entries(lifecycleTopics).filter(([key]) => key !== 'app-uninstalled').map(([key,topic]) => {
     const uri = `${origin}/webhooks/shopify/${encodeURIComponent(app.clientId)}/${key}/${webhookBinding(app,key as LifecycleTopic)}`;
-    return `[[webhooks.subscriptions]]\n${field} = [${JSON.stringify(topic)}]\nuri = ${JSON.stringify(uri)}`;
+    return `[[webhooks.subscriptions]]\ncompliance_topics = [${JSON.stringify(topic)}]\nuri = ${JSON.stringify(uri)}`;
   });
   return `[webhooks]\napi_version = "2026-10"\n\n${entries.join('\n\n')}\n`;
 }

@@ -2,7 +2,9 @@
 
 This developer-operated command performs a real title change through a deployed gateway and restores the original title. Run it only on a disposable development store and one draft product dedicated to testing. Stop other writers to that product for the whole run. The gateway cannot establish the store's development-store billing status; the operator must confirm that independently.
 
-No live-store run has been performed by the implementation agent. Mock tests exercise the command locally.
+Run the smoke harness from a complete source checkout with Node 26, targeting the deployed gateway. Portable-bundle operators can use a separate source checkout on their test machine; the bundle's Docker runtime does not require Node on the installation host.
+
+Live acceptance on 2026-11-05 at `ceb5408d2746392615329a7fa964470daea6d165` passed the guarded title change, idempotent replay and verified restoration on the authorized draft product `10279219986688` in `commerce-gateway-lab.myshopify.com`. The original report is retained at `release-artifacts/windows-lab-acceptance-2026-11-05.json`. This evidence covers that exact source and target; it does not assert live privacy-event coverage or qualification of later changes.
 
 Use a pre-authorized connection belonging to the gateway bearer key's tenant. Its exact canonical shop domain must match both acknowledgements below. Set the exact product GID and its current title. Supply a fresh UUID for a new run, retain it until restoration has been verified, and never paste the bearer into a command argument or issue report.
 

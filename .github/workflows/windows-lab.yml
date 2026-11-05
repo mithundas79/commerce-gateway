@@ -6,6 +6,11 @@ on:
       - '.github/workflows/windows-lab.yml'
       - 'release/windows-lab.ps1'
       - 'release/windows-lab.mjs'
+      - 'release/windows-lab.md'
+      - 'release/shopify-lifecycle.md'
+      - 'src/admin.ts'
+      - 'src/shopify-webhooks.ts'
+      - 'src/oauth.ts'
       - 'scripts/shopify-smoke.mjs'
       - 'tests/windows-lab*.test.*'
   push:
@@ -13,6 +18,11 @@ on:
       - '.github/workflows/windows-lab.yml'
       - 'release/windows-lab.ps1'
       - 'release/windows-lab.mjs'
+      - 'release/windows-lab.md'
+      - 'release/shopify-lifecycle.md'
+      - 'src/admin.ts'
+      - 'src/shopify-webhooks.ts'
+      - 'src/oauth.ts'
       - 'scripts/shopify-smoke.mjs'
       - 'tests/windows-lab*.test.*'
 
