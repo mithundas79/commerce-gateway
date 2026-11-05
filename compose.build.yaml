@@ -1,0 +1,6 @@
+# Source-checkout overlay. The portable bundle uses only compose.yaml.
+services:
+  api:
+    build:
+      context: .
+      target: runtime

@@ -1,0 +1,16 @@
+node_modules
+dist
+.git
+.env
+.env.*
+.secrets
+backups
+release-artifacts
+coverage
+test
+tests
+*.log
+*.tar
+*.dump
+release
+README.md

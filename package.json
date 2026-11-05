@@ -1,0 +1,30 @@
+{
+  "name": "commerce-gateway",
+  "version": "0.1.0-alpha.1",
+  "description": "A self-hosted JSON API for merchant commerce integrations.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Mithun Das",
+  "repository": "github:mithundas79/commerce-gateway",
+  "engines": { "node": ">=26.0.0 <27" },
+  "files": ["dist", "migrations", "openapi.json", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "start": "node dist/main.js",
+    "test": "tsx --test tests/*.test.ts tests/*.test.mjs",
+    "test:integration": "tsx --test --test-concurrency=1 tests/integration/*.test.ts",
+    "bench": "node scripts/bench.mjs"
+  },
+  "dependencies": {
+    "fastify": "5.12.8",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "26.5.0",
+    "@types/pg": "8.23.1",
+    "smol-toml": "1.9.1",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3"
+  }
+}

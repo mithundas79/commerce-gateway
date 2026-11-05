@@ -1,0 +1,58 @@
+name: Windows lab checks
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-lab.yml'
+      - 'release/windows-lab.ps1'
+      - 'release/windows-lab.mjs'
+      - 'release/windows-lab.md'
+      - 'release/shopify-lifecycle.md'
+      - 'src/admin.ts'
+      - 'src/shopify-webhooks.ts'
+      - 'src/oauth.ts'
+      - 'scripts/shopify-smoke.mjs'
+      - 'tests/windows-lab*.test.*'
+  push:
+    paths:
+      - '.github/workflows/windows-lab.yml'
+      - 'release/windows-lab.ps1'
+      - 'release/windows-lab.mjs'
+      - 'release/windows-lab.md'
+      - 'release/shopify-lifecycle.md'
+      - 'src/admin.ts'
+      - 'src/shopify-webhooks.ts'
+      - 'src/oauth.ts'
+      - 'scripts/shopify-smoke.mjs'
+      - 'tests/windows-lab*.test.*'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-powershell:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - name: Exercise Windows PowerShell 5.1 wrapper
+        shell: powershell
+        run: |
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            throw 'Windows PowerShell 5.1 is required for this check'
+          }
+          Write-Output ("Windows PowerShell " + $PSVersionTable.PSVersion.ToString())
+          & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/windows-lab-wrapper.test.ps1
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows PowerShell wrapper harness failed'
+          }
+      - name: Check offline lab guards
+        shell: powershell
+        run: |
+          node --test tests/windows-lab.test.mjs
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Offline lab guard tests failed'
+          }
